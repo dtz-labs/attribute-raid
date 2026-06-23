@@ -1396,6 +1396,11 @@ restore_ship_sprite_row_three:
     ret
 
 draw_sprite:
+    ld a,(sprite_attr)
+    push af
+    call restore_sprite_cell
+    pop af
+    ld (sprite_attr),a
     call calc_sprite_cell_addr
     ld de,(sprite_pattern)
     ld hl,(cell_addr)
@@ -1411,6 +1416,11 @@ draw_sprite_loop:
     ret
 
 draw_shifted_sprite:
+    ld a,(sprite_attr)
+    push af
+    call restore_shifted_sprite_cell
+    pop af
+    ld (sprite_attr),a
     ld a,(sprite_phase)
     or a
     jr nz,draw_shifted_nonzero
@@ -1473,6 +1483,11 @@ draw_shifted_bottom_loop:
     ret
 
 draw_wide_shifted_sprite:
+    ld a,(sprite_attr)
+    push af
+    call restore_wide_shifted_sprite_cell
+    pop af
+    ld (sprite_attr),a
     ld a,(sprite_phase)
     or a
     jr nz,draw_wide_shifted_nonzero
@@ -1556,6 +1571,11 @@ draw_wide_shifted_bottom_loop:
     ret
 
 draw_ship_wide_sprite:
+    ld a,(sprite_attr)
+    push af
+    call restore_ship_shifted_sprite_cell
+    pop af
+    ld (sprite_attr),a
     ld a,(sprite_phase)
     or a
     jr nz,draw_ship_wide_shifted_nonzero
