@@ -47,6 +47,8 @@ Keys:
 
 - `1`: 2 pixels per frame
 - `2`: 4 pixels per frame
+- `UP`: faster, up to 8 pixels per frame
+- `DOWN`: slower, down to 2 pixels per frame
 - `SPACE`: pause
 - `R`: rebuild the precomputed river course
 
@@ -74,11 +76,15 @@ Only 96 samples are visible on the 192-pixel screen, but 1024 entries make the
 repeat much less obvious.  Bank motion is pseudo-random and deterministic: an
 8-bit LFSR builds short 1-2 sample movement segments during initialization, so
 the visible edges are jagged without random work during normal animation.
+The first course segment is kept wide, around 70-80% of the screen, by using a
+higher minimum river width at the beginning of the ring and at the wrapped
+entry point used by the initial scroll.  Later samples allow the river to
+narrow further.
 
 Scrolling does not move the bitmap.  Each frame changes the logical start
-index of the ring buffer by one sample for 2 px mode, or by two samples for
-4 px mode.  Normal frames do not generate river samples; the precomputed
-course loops.
+index of the ring buffer by the current speed: one to four 2-pixel samples,
+or 2-8 pixels per frame.  Normal frames do not generate river samples; the
+precomputed course loops.
 
 ## Sprites
 
@@ -94,10 +100,10 @@ The plane switches to a crash glyph if the current river banks get too close
 to its fixed bottom-screen position.  This is intentionally a coarse renderer
 test, not a final gameplay or collision system.  Bank objects keep pixel `y`
 positions and move down by the same 2 or 4 pixels as the river.  The ship and
-helicopter use the same vertical motion while keeping their slower sideways
-movement.  When a moving sprite is not aligned to an 8-pixel cell boundary,
-only the two cells touched by that shifted sprite are reconstructed and
-redrawn.
+helicopter use the same vertical motion while also moving sideways in pixel
+steps rather than whole character columns.  Their horizontally shifted forms
+are precomputed as byte pairs, so each frame only selects the needed phase and
+updates the one to four cells touched by the sprite.
 
 The Timex build uses Timex video mode 1: screen 0 at `0x4000` and screen 1 at
 `0x6000`.  Each screen remembers which river index and sprite positions it
