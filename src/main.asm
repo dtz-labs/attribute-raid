@@ -86,11 +86,13 @@ reinitialize_demo:
     ret
 
 init_video_buffers:
+    call reset_sprite_state
     xor a
     ld (screen_page_offset),a
     ld (display_page),a
     call full_redraw
-    call update_and_draw_sprites
+    call draw_current_sprites
+    call store_drawn_sprite_state
 
     ld a,(timex_enabled)
     or a
@@ -99,7 +101,8 @@ init_video_buffers:
     ld a,0x20
     ld (screen_page_offset),a
     call full_redraw
-    call update_and_draw_sprites
+    call draw_current_sprites
+    call store_drawn_sprite_state
 
     xor a
     out (0xff),a
@@ -667,9 +670,48 @@ r_not_pressed:
     ld (r_down),a
     ret
 
+reset_sprite_state:
+    xor a
+    ld (frame_counter),a
+    ld (plane_crashed),a
+    ld a,16
+    ld (bank0_y),a
+    ld a,2
+    ld (bank0_col),a
+    ld a,64
+    ld (bank1_y),a
+    ld a,28
+    ld (bank1_col),a
+    ld a,112
+    ld (bank2_y),a
+    ld a,3
+    ld (bank2_col),a
+    ld a,160
+    ld (bank3_y),a
+    ld a,26
+    ld (bank3_col),a
+    ld a,15
+    ld (ship_col),a
+    ld a,88
+    ld (ship_y),a
+    ld a,1
+    ld (ship_dir),a
+    ld a,21
+    ld (heli_col),a
+    ld a,48
+    ld (heli_y),a
+    ld a,255
+    ld (heli_dir),a
+    ret
+
 update_and_draw_sprites:
     call restore_moving_sprites
     call update_moving_sprites
+    call draw_current_sprites
+    call store_drawn_sprite_state
+    ret
+
+draw_current_sprites:
     call draw_bank_objects
     call draw_ship
     call draw_helicopter
@@ -679,17 +721,19 @@ update_and_draw_sprites:
 restore_moving_sprites:
     call restore_bank_objects
 
-    ld a,11
-    ld (sprite_row),a
-    ld a,(ship_col)
+    call load_drawn_ship_y
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    call load_drawn_ship_col
     ld (sprite_col),a
-    call restore_sprite_cell
+    call restore_shifted_sprite_cell
 
-    ld a,6
-    ld (sprite_row),a
-    ld a,(heli_col)
+    call load_drawn_heli_y
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    call load_drawn_heli_col
     ld (sprite_col),a
-    call restore_sprite_cell
+    call restore_shifted_sprite_cell
     ret
 
 update_moving_sprites:
@@ -698,7 +742,7 @@ update_moving_sprites:
     ld (frame_counter),a
     ld b,a
     push bc
-    call update_bank_scroll
+    call advance_scrolling_sprites
     pop bc
 
     and 7
@@ -758,72 +802,98 @@ heli_move_right:
     ld (heli_dir),a
     ret
 
-update_bank_scroll:
-    ld a,(bank_scroll_accum)
-    ld c,a
+advance_scrolling_sprites:
     ld a,(speed_samples)
+    add a,a
+    ld c,a
+    ld a,(bank0_y)
+    call advance_sprite_y
+    ld (bank0_y),a
+    ld a,(bank1_y)
+    call advance_sprite_y
+    ld (bank1_y),a
+    ld a,(bank2_y)
+    call advance_sprite_y
+    ld (bank2_y),a
+    ld a,(bank3_y)
+    call advance_sprite_y
+    ld (bank3_y),a
+    ld a,(ship_y)
+    call advance_sprite_y
+    ld (ship_y),a
+    ld a,(heli_y)
+    call advance_sprite_y
+    ld (heli_y),a
+    ret
+
+advance_sprite_y:
     add a,c
-    cp 4
-    jr nc,bank_scroll_step
-    ld (bank_scroll_accum),a
-    ret
-bank_scroll_step:
-    sub 4
-    ld (bank_scroll_accum),a
-    call advance_bank_objects
-    ret
-
-advance_bank_objects:
-    ld a,(bank0_row)
-    call advance_bank_row
-    ld (bank0_row),a
-    ld a,(bank1_row)
-    call advance_bank_row
-    ld (bank1_row),a
-    ld a,(bank2_row)
-    call advance_bank_row
-    ld (bank2_row),a
-    ld a,(bank3_row)
-    call advance_bank_row
-    ld (bank3_row),a
-    ret
-
-advance_bank_row:
-    inc a
-    cp 24
+    cp 184
     ret c
     xor a
     ret
 
 restore_bank_objects:
-    ld a,(bank0_row)
-    ld (sprite_row),a
-    ld a,(bank0_col)
-    ld (sprite_col),a
-    call restore_sprite_cell
+    ld a,(screen_page_offset)
+    or a
+    jr nz,restore_bank_objects_page1
 
-    ld a,(bank1_row)
-    ld (sprite_row),a
-    ld a,(bank1_col)
-    ld (sprite_col),a
-    call restore_sprite_cell
+restore_bank_objects_page0:
+    ld a,(buffer0_bank0_col)
+    ld c,a
+    ld a,(buffer0_bank0_y)
+    call restore_bank_object
 
-    ld a,(bank2_row)
-    ld (sprite_row),a
-    ld a,(bank2_col)
-    ld (sprite_col),a
-    call restore_sprite_cell
+    ld a,(buffer0_bank1_col)
+    ld c,a
+    ld a,(buffer0_bank1_y)
+    call restore_bank_object
 
-    ld a,(bank3_row)
-    ld (sprite_row),a
-    ld a,(bank3_col)
+    ld a,(buffer0_bank2_col)
+    ld c,a
+    ld a,(buffer0_bank2_y)
+    call restore_bank_object
+
+    ld a,(buffer0_bank3_col)
+    ld c,a
+    ld a,(buffer0_bank3_y)
+    call restore_bank_object
+    ret
+
+restore_bank_objects_page1:
+    ld a,(buffer1_bank0_col)
+    ld c,a
+    ld a,(buffer1_bank0_y)
+    call restore_bank_object
+
+    ld a,(buffer1_bank1_col)
+    ld c,a
+    ld a,(buffer1_bank1_y)
+    call restore_bank_object
+
+    ld a,(buffer1_bank2_col)
+    ld c,a
+    ld a,(buffer1_bank2_y)
+    call restore_bank_object
+
+    ld a,(buffer1_bank3_col)
+    ld c,a
+    ld a,(buffer1_bank3_y)
+    call restore_bank_object
+    ret
+
+restore_bank_object:
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    ld a,c
     ld (sprite_col),a
-    call restore_sprite_cell
+    call restore_shifted_sprite_cell
     ret
 
 draw_bank_objects:
-    ld a,(bank0_row)
-    ld (sprite_row),a
+    ld a,(bank0_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
     call set_left_bank_sprite_col
     ld a,(sprite_col)
     ld (bank0_col),a
@@ -831,10 +901,11 @@ draw_bank_objects:
     ld (sprite_pattern),hl
     ld a,0x20
     ld (sprite_attr),a
-    call draw_sprite
+    call draw_shifted_sprite
 
-    ld a,(bank1_row)
-    ld (sprite_row),a
+    ld a,(bank1_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
     call set_right_bank_sprite_col
     ld a,(sprite_col)
     ld (bank1_col),a
@@ -842,10 +913,11 @@ draw_bank_objects:
     ld (sprite_pattern),hl
     ld a,0x20
     ld (sprite_attr),a
-    call draw_sprite
+    call draw_shifted_sprite
 
-    ld a,(bank2_row)
-    ld (sprite_row),a
+    ld a,(bank2_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
     call set_left_bank_sprite_col
     ld a,(sprite_col)
     ld (bank2_col),a
@@ -853,10 +925,11 @@ draw_bank_objects:
     ld (sprite_pattern),hl
     ld a,0x20
     ld (sprite_attr),a
-    call draw_sprite
+    call draw_shifted_sprite
 
-    ld a,(bank3_row)
-    ld (sprite_row),a
+    ld a,(bank3_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
     call set_right_bank_sprite_col
     ld a,(sprite_col)
     ld (bank3_col),a
@@ -864,13 +937,122 @@ draw_bank_objects:
     ld (sprite_pattern),hl
     ld a,0x20
     ld (sprite_attr),a
-    call draw_sprite
+    call draw_shifted_sprite
+    ret
+
+store_drawn_sprite_state:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,store_drawn_sprite_state_page1
+
+store_drawn_sprite_state_page0:
+    ld a,(bank0_y)
+    ld (buffer0_bank0_y),a
+    ld a,(bank0_col)
+    ld (buffer0_bank0_col),a
+    ld a,(bank1_y)
+    ld (buffer0_bank1_y),a
+    ld a,(bank1_col)
+    ld (buffer0_bank1_col),a
+    ld a,(bank2_y)
+    ld (buffer0_bank2_y),a
+    ld a,(bank2_col)
+    ld (buffer0_bank2_col),a
+    ld a,(bank3_y)
+    ld (buffer0_bank3_y),a
+    ld a,(bank3_col)
+    ld (buffer0_bank3_col),a
+    ld a,(ship_col)
+    ld (buffer0_ship_col),a
+    ld a,(ship_y)
+    ld (buffer0_ship_y),a
+    ld a,(heli_col)
+    ld (buffer0_heli_col),a
+    ld a,(heli_y)
+    ld (buffer0_heli_y),a
+    ret
+
+store_drawn_sprite_state_page1:
+    ld a,(bank0_y)
+    ld (buffer1_bank0_y),a
+    ld a,(bank0_col)
+    ld (buffer1_bank0_col),a
+    ld a,(bank1_y)
+    ld (buffer1_bank1_y),a
+    ld a,(bank1_col)
+    ld (buffer1_bank1_col),a
+    ld a,(bank2_y)
+    ld (buffer1_bank2_y),a
+    ld a,(bank2_col)
+    ld (buffer1_bank2_col),a
+    ld a,(bank3_y)
+    ld (buffer1_bank3_y),a
+    ld a,(bank3_col)
+    ld (buffer1_bank3_col),a
+    ld a,(ship_col)
+    ld (buffer1_ship_col),a
+    ld a,(ship_y)
+    ld (buffer1_ship_y),a
+    ld a,(heli_col)
+    ld (buffer1_heli_col),a
+    ld a,(heli_y)
+    ld (buffer1_heli_y),a
+    ret
+
+load_drawn_ship_col:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_ship_col_page1
+    ld a,(buffer0_ship_col)
+    ret
+load_drawn_ship_col_page1:
+    ld a,(buffer1_ship_col)
+    ret
+
+load_drawn_ship_y:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_ship_y_page1
+    ld a,(buffer0_ship_y)
+    ret
+load_drawn_ship_y_page1:
+    ld a,(buffer1_ship_y)
+    ret
+
+load_drawn_heli_col:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_heli_col_page1
+    ld a,(buffer0_heli_col)
+    ret
+load_drawn_heli_col_page1:
+    ld a,(buffer1_heli_col)
+    ret
+
+load_drawn_heli_y:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_heli_y_page1
+    ld a,(buffer0_heli_y)
+    ret
+load_drawn_heli_y_page1:
+    ld a,(buffer1_heli_y)
+    ret
+
+set_sprite_row_phase_from_y:
+    ld b,a
+    and 7
+    ld (sprite_phase),a
+    ld a,b
+    srl a
+    srl a
+    srl a
+    ld (sprite_row),a
     ret
 
 set_left_bank_sprite_col:
-    ld a,(sprite_row)
-    add a,a
-    add a,a
+    ld a,(sprite_y)
+    srl a
     add a,2
     ld b,a
     ld a,(start_lo)
@@ -893,9 +1075,8 @@ left_sprite_col_ready:
     ret
 
 set_right_bank_sprite_col:
-    ld a,(sprite_row)
-    add a,a
-    add a,a
+    ld a,(sprite_y)
+    srl a
     add a,2
     ld b,a
     ld a,(start_lo)
@@ -914,27 +1095,29 @@ right_sprite_page_ready:
     ret
 
 draw_ship:
-    ld a,11
-    ld (sprite_row),a
+    ld a,(ship_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
     ld a,(ship_col)
     ld (sprite_col),a
     ld hl,ship_sprite
     ld (sprite_pattern),hl
     ld a,0x4f
     ld (sprite_attr),a
-    call draw_sprite
+    call draw_shifted_sprite
     ret
 
 draw_helicopter:
-    ld a,6
-    ld (sprite_row),a
+    ld a,(heli_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
     ld a,(heli_col)
     ld (sprite_col),a
     ld hl,helicopter_sprite
     ld (sprite_pattern),hl
     ld a,0x4e
     ld (sprite_attr),a
-    call draw_sprite
+    call draw_shifted_sprite
     ret
 
 draw_plane:
@@ -1000,6 +1183,22 @@ restore_sprite_cell:
     call set_sprite_attr
     ret
 
+restore_shifted_sprite_cell:
+    call restore_sprite_cell
+    ld a,(sprite_phase)
+    or a
+    ret z
+    ld a,(sprite_row)
+    cp 23
+    ret z
+    inc a
+    ld (sprite_row),a
+    call restore_sprite_cell
+    ld a,(sprite_row)
+    dec a
+    ld (sprite_row),a
+    ret
+
 draw_sprite:
     call calc_sprite_cell_addr
     ld de,(sprite_pattern)
@@ -1012,6 +1211,66 @@ draw_sprite_loop:
     inc h
     djnz draw_sprite_loop
     call set_sprite_attr
+    ret
+
+draw_shifted_sprite:
+    ld a,(sprite_phase)
+    or a
+    jr nz,draw_shifted_nonzero
+    call draw_sprite
+    ret
+
+draw_shifted_nonzero:
+    call calc_sprite_cell_addr
+    ld hl,(cell_addr)
+    ld a,(sprite_phase)
+    ld b,a
+draw_shifted_top_addr_loop:
+    inc h
+    djnz draw_shifted_top_addr_loop
+
+    ld de,(sprite_pattern)
+    ld a,(sprite_phase)
+    ld b,a
+    ld a,8
+    sub b
+    ld b,a
+draw_shifted_top_loop:
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc h
+    djnz draw_shifted_top_loop
+    call set_sprite_attr
+
+    ld a,(sprite_row)
+    inc a
+    ld (sprite_row),a
+    call calc_sprite_cell_addr
+    ld hl,(cell_addr)
+    ld de,(sprite_pattern)
+    ld a,(sprite_phase)
+    ld c,a
+    ld a,8
+    sub c
+    ld b,a
+draw_shifted_skip_loop:
+    inc de
+    djnz draw_shifted_skip_loop
+
+    ld a,(sprite_phase)
+    ld b,a
+draw_shifted_bottom_loop:
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc h
+    djnz draw_shifted_bottom_loop
+    call set_sprite_attr
+
+    ld a,(sprite_row)
+    dec a
+    ld (sprite_row),a
     ret
 
 calc_sprite_cell_addr:
@@ -1165,35 +1424,41 @@ cell_addr:
     dw 0
 frame_counter:
     db 0
-bank_scroll_accum:
-    db 0
-bank0_row:
-    db 2
+bank0_y:
+    db 16
 bank0_col:
     db 2
-bank1_row:
-    db 8
+bank1_y:
+    db 64
 bank1_col:
     db 28
-bank2_row:
-    db 14
+bank2_y:
+    db 112
 bank2_col:
     db 3
-bank3_row:
-    db 20
+bank3_y:
+    db 160
 bank3_col:
     db 26
 ship_col:
     db 15
+ship_y:
+    db 88
 ship_dir:
     db 1
 heli_col:
     db 21
+heli_y:
+    db 48
 heli_dir:
     db 255
 plane_crashed:
     db 0
 sprite_row:
+    db 0
+sprite_y:
+    db 0
+sprite_phase:
     db 0
 sprite_col:
     db 0
@@ -1201,6 +1466,56 @@ sprite_pattern:
     dw 0
 sprite_attr:
     db 0
+
+buffer0_bank0_y:
+    db 16
+buffer0_bank0_col:
+    db 2
+buffer0_bank1_y:
+    db 64
+buffer0_bank1_col:
+    db 28
+buffer0_bank2_y:
+    db 112
+buffer0_bank2_col:
+    db 3
+buffer0_bank3_y:
+    db 160
+buffer0_bank3_col:
+    db 26
+buffer0_ship_col:
+    db 15
+buffer0_ship_y:
+    db 88
+buffer0_heli_col:
+    db 21
+buffer0_heli_y:
+    db 48
+
+buffer1_bank0_y:
+    db 16
+buffer1_bank0_col:
+    db 2
+buffer1_bank1_y:
+    db 64
+buffer1_bank1_col:
+    db 28
+buffer1_bank2_y:
+    db 112
+buffer1_bank2_col:
+    db 3
+buffer1_bank3_y:
+    db 160
+buffer1_bank3_col:
+    db 26
+buffer1_ship_col:
+    db 15
+buffer1_ship_y:
+    db 88
+buffer1_heli_col:
+    db 21
+buffer1_heli_y:
+    db 48
 
 align 256
 prefix_mask:

@@ -92,13 +92,17 @@ background:
 Sprite cells are redrawn over the reconstructed river background each frame.
 The plane switches to a crash glyph if the current river banks get too close
 to its fixed bottom-screen position.  This is intentionally a coarse renderer
-test, not a final gameplay or collision system.  Bank objects recompute their
-column from the current river geometry as they move down, so they follow the
-jagged bank instead of staying fixed on the screen.
+test, not a final gameplay or collision system.  Bank objects keep pixel `y`
+positions and move down by the same 2 or 4 pixels as the river.  The ship and
+helicopter use the same vertical motion while keeping their slower sideways
+movement.  When a moving sprite is not aligned to an 8-pixel cell boundary,
+only the two cells touched by that shifted sprite are reconstructed and
+redrawn.
 
 The Timex build uses Timex video mode 1: screen 0 at `0x4000` and screen 1 at
-`0x6000`.  Each screen remembers which river index it contains, so the dirty
-renderer can update the hidden page before flipping it with port `0xff`.
+`0x6000`.  Each screen remembers which river index and sprite positions it
+contains, so the dirty renderer can update only the hidden page's old bank,
+ship, and helicopter cells before flipping it with port `0xff`.
 
 ## Dirty Rendering
 
