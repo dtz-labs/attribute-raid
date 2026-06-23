@@ -30,26 +30,14 @@ main_loop:
 scroll_two_pixels:
     ld a,(start_idx)
     dec a
-    and 127
     ld (start_idx),a
-    ld e,a
-    call generate_one_at_index
     jr generation_done
 
 scroll_four_pixels:
     ld a,(start_idx)
     dec a
-    and 127
-    ld e,a
-    call generate_one_at_index
-
-    ld a,(start_idx)
     dec a
-    dec a
-    and 127
     ld (start_idx),a
-    ld e,a
-    call generate_one_at_index
 
 generation_done:
     call render_dirty
@@ -95,18 +83,7 @@ init_river_loop:
     call generate_one_at_index
     pop de
     inc e
-    ld a,e
-    cp 128
     jr nz,init_river_loop
-
-    ld h,HIGH(left_bank)
-    ld l,0
-    ld a,(hl)
-    ld (gen_left),a
-    ld h,HIGH(right_bank)
-    ld l,0
-    ld a,(hl)
-    ld (gen_right),a
     ret
 
 generate_one_at_index:
@@ -151,8 +128,7 @@ pick_new_motion:
     call lfsr_next
     ld b,a
     ld a,b
-    and 7
-    add a,2
+    and 1
     ld (segment_timer),a
 
     ld a,b
@@ -279,11 +255,9 @@ dirty_row_loop:
 
     ld a,(old_row_index)
     add a,4
-    and 127
     ld (old_row_index),a
     ld a,(new_row_index)
     add a,4
-    and 127
     ld (new_row_index),a
     ld a,(row_var)
     inc a
@@ -302,9 +276,6 @@ calc_bank_range:
     ld d,3
 calc_range_loop:
     inc l
-    ld a,l
-    and 127
-    ld l,a
     ld a,(hl)
     call x_to_column
     cp b
@@ -386,7 +357,6 @@ render_cell:
     ld b,a
     ld a,(start_idx)
     add a,b
-    and 127
     ld (cell_sample),a
 
     call render_cell_sample
@@ -407,7 +377,6 @@ render_cell_sample:
 
     ld a,(cell_sample)
     inc a
-    and 127
     ld (cell_sample),a
     ret
 
@@ -589,8 +558,8 @@ suffix_mask:
 
 align 256
 left_bank:
-    ds 128,0
+    ds 256,0
 
 align 256
 right_bank:
-    ds 128,0
+    ds 256,0

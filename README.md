@@ -41,7 +41,7 @@ Keys:
 - `1`: 2 pixels per frame
 - `2`: 4 pixels per frame
 - `SPACE`: pause
-- `R`: regenerate the river
+- `R`: rebuild the precomputed river course
 
 ## Graphics Model
 
@@ -58,19 +58,21 @@ for the 50 Hz budget.
 ## River Representation
 
 The river geometry has 2-pixel vertical resolution.  One sample describes two
-scanlines.  Two 128-byte ring buffers store the banks:
+scanlines.  Two 256-byte precomputed buffers store the banks:
 
 - `left_bank[i]`: first water pixel after the left land
 - `right_bank[i]`: first right-land pixel
 
-Only 96 samples are visible on the 192-pixel screen, but 128 entries make
-wrapping cheap with `AND 127`.  Bank motion is pseudo-random and deterministic:
-an 8-bit LFSR chooses short 2-9 sample movement segments, so the visible edges
-are jagged without requiring random work inside the renderer.
+Only 96 samples are visible on the 192-pixel screen, but 256 entries make
+wrapping free through 8-bit overflow.  Bank motion is pseudo-random and
+deterministic: an 8-bit LFSR builds short 1-2 sample movement segments during
+initialization, so the visible edges are jagged without random work during
+normal animation.
 
 Scrolling does not move the bitmap.  Each frame changes the logical start
 index of the ring buffer by one sample for 2 px mode, or by two samples for
-4 px mode.  New samples are generated at the top.
+4 px mode.  Normal frames do not generate river samples; the precomputed
+course loops.
 
 ## Dirty Rendering
 
