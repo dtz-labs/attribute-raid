@@ -1,0 +1,647 @@
+Jesteś w pustym katalogu `attribute-raid`.
+
+To jest NOWY, samodzielny projekt od zera.
+
+Nie istnieje żaden wcześniejszy kod, gameplay, repozytorium ani projekt
+`attribute-wars`. Nie odwołuj się do żadnych poprzednich projektów, teł,
+mechanik, testów ani ograniczeń pochodzących z innego kontekstu.
+
+Zbuduj minimalny proof of concept dla ZX Spectrum 48K pokazujący bardzo
+wydajne animowanie rzeki w stylu River Raid.
+
+==================================================
+CEL PROJEKTU
+==================================================
+
+Na ekranie ma być widoczna:
+
+- zielona ziemia,
+- niebieska rzeka,
+- dwa nieregularne brzegi,
+- rzeka poruszająca się płynnie od góry do dołu.
+
+Nie twórz jeszcze:
+
+- samolotu,
+- przeciwników,
+- pocisków,
+- paliwa,
+- mostów,
+- kolizji,
+- punktacji,
+- muzyki,
+- menu,
+- gotowej gry.
+
+To ma być wyłącznie eksperyment renderera rzeki.
+
+Najważniejsze pytanie eksperymentu:
+
+„Czy można stworzyć płynnie przewijającą się rzekę na ZX Spectrum bez
+kopiowania całego ekranu, przerysowując jedynie bardzo wąskie pasy
+kafelków wokół obu brzegów?”
+
+==================================================
+PLATFORMA
+==================================================
+
+Podstawowy target:
+
+- ZX Spectrum 48K,
+- standardowy ekran 256×192,
+- standardowa bitmapa pod adresem 0x4000,
+- standardowe atrybuty pod adresem 0x5800,
+- odświeżanie zsynchronizowane z przerwaniem 50 Hz.
+
+Kod powinien działać również na ZX Spectrum 128K w trybie zgodności,
+ale nie używaj:
+
+- bankowania 128K,
+- drugiego ekranu,
+- page flippingu,
+- trybów Timex,
+- sprzętowego scrolla.
+
+W pierwszym PoC używaj jednego standardowego ekranu Spectrum.
+
+Preferowana implementacja:
+
+- Z80 assembler,
+- kod wykonywalny od adresu 32768 lub innego bezpiecznego adresu,
+- prosty loader BASIC,
+- wynik jako plik TAP.
+
+Najpierw sprawdź, jaki assembler ZX Spectrum jest dostępny w systemie.
+Preferuj najprostsze dostępne rozwiązanie, np. sjasmplus albo z88dk.
+Nie dołączaj binarnych narzędzi do repozytorium.
+
+==================================================
+STRUKTURA PROJEKTU
+==================================================
+
+Przygotuj mały, czysty projekt, na przykład:
+
+    Makefile
+    README.md
+    src/main.asm
+    src/river.asm
+    src/render.asm
+    src/data.asm
+    build/
+
+Możesz uprościć strukturę, jeżeli cały kod jest niewielki.
+
+Wymagane komendy:
+
+    make
+    make clean
+
+Wynik:
+
+    build/attribute-raid.tap
+
+Opcjonalnie może również powstawać plik SNA.
+
+==================================================
+MODEL GRAFIKI
+==================================================
+
+Cały ekran używa dwóch kolorów:
+
+- zielony ląd,
+- niebieska woda.
+
+Ustaw wszystkie atrybuty ekranu jeden raz podczas inicjalizacji:
+
+    BRIGHT = 1
+    INK    = green
+    PAPER  = blue
+
+Przykładowa wartość atrybutu:
+
+    0x4C
+
+W bitmapie:
+
+- bit ustawiony na 1 oznacza zielony ląd,
+- bit ustawiony na 0 oznacza niebieską wodę.
+
+Przykłady kafelków 8×8:
+
+Pełna woda:
+
+    00000000
+    00000000
+    00000000
+    00000000
+    00000000
+    00000000
+    00000000
+    00000000
+
+Pełny ląd:
+
+    11111111
+    11111111
+    11111111
+    11111111
+    11111111
+    11111111
+    11111111
+    11111111
+
+Fragment brzegu:
+
+    11100000
+    11100000
+    11110000
+    11110000
+    11111000
+    11111000
+    11111100
+    11111100
+
+Nie zmieniaj atrybutów podczas normalnej animacji.
+
+Animacja ma polegać wyłącznie na zmianie niewielkiej liczby bajtów
+bitmapy.
+
+==================================================
+KAFELKI 8×8
+==================================================
+
+Traktuj ekran jako:
+
+    32 kolumny × 24 rzędy kafelków 8×8.
+
+Nie jest to sprzętowy tryb znakowy. Kafel 8×8 jest programowo kopiowany
+lub generowany bezpośrednio w bitmapie Spectrum.
+
+Renderer ma działać na pojedynczych komórkach:
+
+    render_cell(row, column)
+
+Funkcja odtwarza kompletne 8 bajtów danej komórki zgodnie z aktualnym
+kształtem rzeki.
+
+Pełne komórki lądu i wody mogą być tworzone przez:
+
+    0xFF – ląd
+    0x00 – woda
+
+Komórki przecinane przez brzeg korzystają z masek bitowych.
+
+Przygotuj tablice masek, na przykład:
+
+    prefix_mask:
+        0x00
+        0x80
+        0xC0
+        0xE0
+        0xF0
+        0xF8
+        0xFC
+        0xFE
+        0xFF
+
+    suffix_mask:
+        0x00
+        0x01
+        0x03
+        0x07
+        0x0F
+        0x1F
+        0x3F
+        0x7F
+        0xFF
+
+Maska linii kafelka ma oznaczać:
+
+- ląd na lewo od lewego brzegu,
+- wodę pomiędzy brzegami,
+- ląd na prawo od prawego brzegu.
+
+==================================================
+REPREZENTACJA RZEKI
+==================================================
+
+Rozdzielczość pionowa geometrii rzeki ma wynosić 2 piksele.
+
+Jeden element danych opisuje dwa kolejne scanline’y.
+
+Użyj dwóch buforów pierścieniowych:
+
+    left_bank[128]
+    right_bank[128]
+
+Każdy element zawiera poziomą współrzędną X brzegu.
+
+Przykładowo:
+
+    left_bank[i]  = pierwszy piksel wody po lewej stronie
+    right_bank[i] = pierwszy piksel lądu po prawej stronie
+
+Dzięki temu jeden ekran 192-pikselowy potrzebuje tylko:
+
+    96 próbek po 2 piksele
+
+Bufor długości 128 pozostawia zapas na wygodne zawijanie indeksów.
+
+Użyj 8-bitowego indeksu lub wydajnego zawijania dla długości 128.
+
+Nie przechowuj całych klatek bitmapy.
+
+Nie twórz drugiego bufora ekranu.
+
+==================================================
+RUCH RZEKI
+==================================================
+
+Podstawowy tryb:
+
+    2 piksele na klatkę.
+
+Oznacza to:
+
+1. cofnięcie indeksu początku bufora o jedną próbkę,
+2. wygenerowanie jednej nowej próbki na górze,
+3. stare próbki pojawiają się dwa piksele niżej,
+4. najstarsza próbka znika na dole.
+
+Dodaj drugi tryb:
+
+    4 piksele na klatkę.
+
+W tym trybie przesuwaj indeks o dwie próbki i generuj dwie nowe próbki.
+
+Sterowanie testowe:
+
+    klawisz 1 – ruch 2 px na klatkę
+    klawisz 2 – ruch 4 px na klatkę
+    SPACE     – pauza
+    R         – wygenerowanie rzeki od nowa
+
+Nie jest wymagany tekst na ekranie.
+
+==================================================
+GENERATOR RZEKI
+==================================================
+
+Rzeka ma łagodnie:
+
+- skręcać w lewo,
+- skręcać w prawo,
+- zwężać się,
+- rozszerzać się.
+
+Generator może używać:
+
+- pozycji środka rzeki,
+- szerokości rzeki,
+- kierunku zmiany środka,
+- kierunku zmiany szerokości,
+- małego LFSR.
+
+Przykładowy model:
+
+    center
+    half_width
+    center_velocity
+    width_velocity
+
+Wyliczaj:
+
+    left  = center - half_width
+    right = center + half_width
+
+Ograniczenia:
+
+- minimalna szerokość rzeki: około 64 piksele,
+- maksymalna szerokość: około 144 piksele,
+- lewy brzeg nie może wyjść poza ekran,
+- prawy brzeg nie może wyjść poza ekran,
+- zmiana położenia brzegu pomiędzy sąsiednimi próbkami nie może być
+  gwałtowna.
+
+Preferowane ograniczenie:
+
+    maksymalnie 1 piksel zmiany X na jedną próbkę 2-pikselową.
+
+To ograniczenie jest ważne, ponieważ gwarantuje, że podczas kolejnej
+klatki zmieni się tylko bardzo wąski obszar wokół brzegu.
+
+Unikaj w pętli klatki:
+
+- dzielenia,
+- modulo,
+- mnożenia,
+- liczb 16-bitowych tam, gdzie wystarczy 8 bitów.
+
+==================================================
+NAJWAŻNIEJSZA OPTYMALIZACJA
+==================================================
+
+Nie przesuwaj całej bitmapy.
+
+Nie kopiuj 6144 bajtów ekranu.
+
+Nie używaj LDIR lub LDDR do scrollowania ekranu.
+
+Nie przerysowuj wszystkich 32×24 kafelków w każdej klatce.
+
+Pełny ekran wolno narysować tylko:
+
+- podczas uruchomienia,
+- po naciśnięciu R,
+- po ponownej inicjalizacji demonstracji.
+
+W normalnej klatce aktualizuj wyłącznie małe obszary wokół lewego
+i prawego brzegu.
+
+Dla każdego z 24 rzędów kafelków:
+
+1. Sprawdź, w których kolumnach znajdował się lewy brzeg w poprzedniej
+   klatce.
+2. Sprawdź, w których kolumnach znajduje się lewy brzeg w nowej klatce.
+3. Przerysuj sumę starego i nowego zakresu.
+4. Zrób to samo dla prawego brzegu.
+
+Dla jednego rzędu 8-pikselowego brzeg jest opisany przez cztery próbki
+po 2 piksele.
+
+Znajdź minimalną i maksymalną kolumnę bajtową przecinaną przez te
+próbki:
+
+    column = x >> 3
+
+Policz zakres osobno dla:
+
+- poprzedniego położenia bufora,
+- aktualnego położenia bufora.
+
+Następnie przerysuj zakres:
+
+    min(old_min, new_min) ... max(old_max, new_max)
+
+Generator powinien sprawić, że zakres będzie miał zwykle:
+
+    1–2 kafle szerokości,
+
+a w trudniejszym przypadku:
+
+    maksymalnie około 3 kafli szerokości.
+
+Nie chodzi o 2–3 kafle na cały ekran.
+
+Chodzi o wąski pas 2–3 kafli wokół każdego brzegu, dla każdego z 24
+rzędów ekranu.
+
+Przy dwóch brzegach najgorszy rozsądny przypadek to:
+
+    24 rzędy
+    × 2 brzegi
+    × 3 kafle
+    × 8 bajtów
+    = 1152 zapisane bajty bitmapy
+
+Typowy przypadek powinien być bliższy:
+
+    400–800 bajtów bitmapy na klatkę.
+
+To nadal wielokrotnie mniej niż kopiowanie pełnych 6144 bajtów.
+
+==================================================
+ODTWARZANIE STAREGO BRZEGU
+==================================================
+
+Po przesunięciu rzeki stary brzeg nie może pozostawiać śladu.
+
+Dlatego zawsze przerysuj zarówno:
+
+- poprzednią pozycję brzegu,
+- aktualną pozycję brzegu.
+
+Funkcja `render_cell` ma odtworzyć pełną zawartość komórki:
+
+- 0xFF, jeżeli komórka stała się lądem,
+- 0x00, jeżeli komórka stała się wodą,
+- odpowiednią maskę, jeżeli przecina ją aktualny brzeg.
+
+Nie kasuj starego brzegu osobną operacją.
+
+Po prostu wygeneruj ponownie jego dawną komórkę według aktualnego stanu
+rzeki.
+
+==================================================
+RENDEROWANIE KOMÓRKI
+==================================================
+
+Dla komórki:
+
+    row
+    column
+
+pobierz cztery kolejne próbki rzeki:
+
+    próbka 0 – scanline 0 i 1
+    próbka 1 – scanline 2 i 3
+    próbka 2 – scanline 4 i 5
+    próbka 3 – scanline 6 i 7
+
+Dla każdej próbki wylicz jeden bajt bitmapy i zapisz go dwukrotnie.
+
+Dla zakresu pikseli należącego do komórki:
+
+    cell_x = column * 8
+    cell_x ... cell_x + 7
+
+ustaw bit na 1, gdy piksel leży:
+
+    x < left_bank
+
+lub:
+
+    x >= right_bank
+
+Pozostaw bit 0, gdy piksel należy do wody.
+
+Nie wykonuj pętli po ośmiu pojedynczych pikselach, jeżeli można użyć
+tablic `prefix_mask` i `suffix_mask`.
+
+==================================================
+UKŁAD PAMIĘCI EKRANU
+==================================================
+
+Uwzględnij nieliniową organizację bitmapy ZX Spectrum.
+
+Nie zakładaj, że kolejne scanline’y leżą bezpośrednio po sobie.
+
+Preferowane rozwiązanie:
+
+- tablica 24 adresów początku rzędów kafelków,
+- jeden adres dla scanline’u `row * 8`,
+- kolumnę dodawaj do młodszego bajtu adresu.
+
+Wewnątrz jednego kafelka kolejne scanline’y są oddalone o 0x100,
+więc można wykorzystać zwiększanie starszego bajtu adresu.
+
+Przykładowa idea:
+
+    zapisz scanline 0
+    zwiększ H
+    zapisz scanline 1
+    zwiększ H
+    ...
+    zapisz scanline 7
+
+Zoptymalizuj zapis 8 bajtów komórki, ale zachowaj czytelność kodu.
+
+==================================================
+PĘTLA GŁÓWNA
+==================================================
+
+Pętla ma być prosta:
+
+    wait_vblank
+    odczytaj klawiaturę
+    zapamiętaj stary indeks bufora
+    przesuń logiczny początek rzeki
+    wygeneruj nowe próbki u góry
+    policz dirty zakresy starego i nowego brzegu
+    przerysuj tylko dirty kafelki
+    wróć do wait_vblank
+
+Nie wykonuj w każdej klatce pełnego czyszczenia ekranu.
+
+Nie wywołuj procedur ROM w gorącej pętli.
+
+==================================================
+PROFILOWANIE BORDEREM
+==================================================
+
+Dodaj proste profilowanie za pomocą koloru ramki.
+
+Przykład:
+
+- czarny border podczas oczekiwania,
+- żółty podczas generowania nowych próbek,
+- czerwony podczas renderowania kafelków,
+- czarny po zakończeniu.
+
+Dzięki temu w emulatorze będzie widać:
+
+- ile czasu trwa generator,
+- ile czasu trwa renderer,
+- czy całość mieści się w jednej ramce 50 Hz.
+
+Nie dodawaj tekstowego HUD-u.
+
+==================================================
+LICZNIKI DIAGNOSTYCZNE
+==================================================
+
+Przechowuj w pamięci zmienne:
+
+    frame_counter
+    cells_written
+    bitmap_bytes_written
+    maximum_cells_written
+
+Nie musisz ich wyświetlać na ekranie.
+
+Umieść czytelne etykiety w pliku symboli lub mapie, aby można było
+sprawdzić je w debuggerze emulatora.
+
+Każde wywołanie `render_cell` oznacza:
+
+    cells_written += 1
+    bitmap_bytes_written += 8
+
+Licznik ma pokazywać rzeczywistą liczbę zapisów, a nie teoretyczne
+założenie.
+
+==================================================
+WARUNKI WYDAJNOŚCIOWE
+==================================================
+
+Docelowy rezultat:
+
+- stabilne 50 aktualizacji na sekundę,
+- scroll 2 px na klatkę,
+- opcjonalny scroll 4 px na klatkę,
+- brak pełnego kopiowania ekranu,
+- brak podwójnego bufora,
+- brak pozostających śladów brzegu,
+- średnio mniej niż około 1000 zapisów bitmapy na klatkę.
+
+Jeżeli 50 Hz nie zostanie osiągnięte:
+
+- nie ukrywaj tego,
+- zmierz wykorzystanie ramki borderem,
+- znajdź najdroższy fragment,
+- zoptymalizuj przede wszystkim `render_cell` i dirty-range calculation.
+
+==================================================
+ZAKAZANE SKRÓTY
+==================================================
+
+Nie wolno:
+
+- kopiować całych 6144 bajtów ekranu,
+- przesuwać wszystkich scanline’ów przez LDIR/LDDR,
+- renderować wszystkich 768 komórek w każdej klatce,
+- używać wcześniej przygotowanej animacji,
+- przełączać gotowych klatek,
+- używać drugiego ekranu,
+- wykorzystywać page flippingu,
+- ukrywać pełnego redraw pod nazwą „dirty rendering”,
+- dodawać gameplayu niezwiązanego z eksperymentem.
+
+Po inicjalizacji zapisuj wyłącznie komórki należące do dirty zakresów
+obu brzegów.
+
+==================================================
+KRYTERIA AKCEPTACJI
+==================================================
+
+PoC jest ukończony, gdy:
+
+1. `make` tworzy `build/attribute-raid.tap`.
+2. TAP uruchamia się na emulowanym ZX Spectrum 48K.
+3. Ekran pokazuje zielony ląd i niebieską, wijącą się rzekę.
+4. Nowy fragment rzeki powstaje u góry.
+5. Cały kształt porusza się wizualnie w dół.
+6. Dostępny jest ruch 2 px i 4 px na klatkę.
+7. Brzegi nie pozostawiają starych pikseli.
+8. Po inicjalizacji nie jest kopiowany ani przerysowywany cały ekran.
+9. Aktualizowane są wyłącznie wąskie pasy kafelków wokół brzegów.
+10. Border pokazuje czas generowania i renderowania.
+11. Kod mierzy liczbę zapisanych komórek i bajtów.
+12. Projekt nie zawiera samolotu, przeciwników ani innych mechanik gry.
+13. README opisuje rzeczywisty algorytm i wyniki pomiarów.
+
+==================================================
+README
+==================================================
+
+W README.md opisz:
+
+- jak zbudować projekt,
+- jak uruchomić TAP,
+- klawisze sterujące,
+- sposób reprezentacji rzeki,
+- dlaczego atrybuty pozostają nieruchome,
+- jak działa bufor pierścieniowy,
+- jak wybierane są dirty kafelki,
+- ile kafelków jest aktualizowanych średnio i maksymalnie,
+- ile bajtów bitmapy jest zapisywanych na klatkę,
+- czy renderer mieści się w 50 Hz,
+- czym ten algorytm różni się od klasycznego kopiowania całego ekranu.
+
+Najważniejsza cecha projektu:
+
+Nie przesuwamy obrazu.
+
+Zmienia się logiczne przypisanie próbek rzeki do pozycji ekranowych,
+a renderer odtwarza tylko te kafelki 8×8, w których zmieniło się
+położenie lewego lub prawego brzegu.
