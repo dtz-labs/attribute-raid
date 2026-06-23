@@ -92,18 +92,18 @@ A prototype sprite layer draws one-cell 8 x 8 objects after the river
 background:
 
 - a white player plane near the bottom of the river
-- a ship and helicopter over the water, moving horizontally
+- three ships and three helicopters over the water, moving horizontally
 - simple tree and tank glyphs that scroll down along both banks
 
 Sprite cells are redrawn over the reconstructed river background each frame.
 The plane switches to a crash glyph if the current river banks get too close
 to its fixed bottom-screen position.  This is intentionally a coarse renderer
 test, not a final gameplay or collision system.  Bank objects keep pixel `y`
-positions and move down by the same 2 or 4 pixels as the river.  The ship and
-helicopter use the same vertical motion while also moving sideways in pixel
-steps rather than whole character columns.  Their horizontally shifted forms
-are precomputed as byte pairs, so each frame only selects the needed phase and
-updates the one to four cells touched by the sprite.
+positions and move down at the current river speed.  Ships and helicopters use
+the same vertical motion while also moving sideways in pixel steps rather than
+whole character columns.  Their horizontally shifted forms are precomputed, so
+each frame only selects the needed phase and updates the cells touched by the
+sprite.
 
 The Timex build uses Timex video mode 1: screen 0 at `0x4000` and screen 1 at
 `0x6000`.  Each screen remembers which river index and sprite positions it

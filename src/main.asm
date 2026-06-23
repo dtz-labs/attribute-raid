@@ -784,12 +784,36 @@ reset_sprite_state:
     ld (ship_y),a
     ld a,1
     ld (ship_dir),a
+    ld a,88
+    ld (ship2_x),a
+    ld a,24
+    ld (ship2_y),a
+    ld a,1
+    ld (ship2_dir),a
+    ld a,152
+    ld (ship3_x),a
+    ld a,152
+    ld (ship3_y),a
+    ld a,255
+    ld (ship3_dir),a
     ld a,168
     ld (heli_x),a
     ld a,48
     ld (heli_y),a
     ld a,255
     ld (heli_dir),a
+    ld a,80
+    ld (heli2_x),a
+    ld a,116
+    ld (heli2_y),a
+    ld a,1
+    ld (heli2_dir),a
+    ld a,128
+    ld (heli3_x),a
+    ld a,176
+    ld (heli3_y),a
+    ld a,255
+    ld (heli3_dir),a
     ret
 
 update_and_draw_sprites:
@@ -802,7 +826,11 @@ update_and_draw_sprites:
 draw_current_sprites:
     call draw_bank_objects
     call draw_ship
+    call draw_ship2
+    call draw_ship3
     call draw_helicopter
+    call draw_helicopter2
+    call draw_helicopter3
     call draw_plane
     ret
 
@@ -816,67 +844,130 @@ restore_moving_sprites:
     call set_sprite_col_phase_from_x
     call restore_ship_shifted_sprite_cell
 
+    call load_drawn_ship2_y
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    call load_drawn_ship2_x
+    call set_sprite_col_phase_from_x
+    call restore_ship_shifted_sprite_cell
+
+    call load_drawn_ship3_y
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    call load_drawn_ship3_x
+    call set_sprite_col_phase_from_x
+    call restore_ship_shifted_sprite_cell
+
     call load_drawn_heli_y
     ld (sprite_y),a
     call set_sprite_row_phase_from_y
     call load_drawn_heli_x
     call set_sprite_col_phase_from_x
     call restore_wide_shifted_sprite_cell
+
+    call load_drawn_heli2_y
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    call load_drawn_heli2_x
+    call set_sprite_col_phase_from_x
+    call restore_wide_shifted_sprite_cell
+
+    call load_drawn_heli3_y
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    call load_drawn_heli3_x
+    call set_sprite_col_phase_from_x
+    call restore_wide_shifted_sprite_cell
     ret
 
 update_moving_sprites:
     call advance_scrolling_sprites
+    ld hl,ship_x
+    call advance_ship_x
+    ld hl,ship2_x
+    call advance_ship_x
+    ld hl,ship3_x
+    call advance_ship_x
+    ld hl,heli_x
+    call advance_heli_x
+    ld hl,heli2_x
+    call advance_heli_x
+    ld hl,heli3_x
+    call advance_heli_x
+    ret
 
-    ld a,(ship_dir)
+advance_ship_x:
+    inc hl
+    inc hl
+    ld a,(hl)
     cp 1
-    jr z,ship_move_right
-ship_move_left:
-    ld a,(ship_x)
+    jr z,advance_ship_x_right
+    dec hl
+    dec hl
+    ld a,(hl)
     dec a
-    ld (ship_x),a
-    cp 88
-    jr nc,ship_update_done
-    ld a,88
-    ld (ship_x),a
-    ld a,1
-    ld (ship_dir),a
-    jr ship_update_done
-ship_move_right:
-    ld a,(ship_x)
-    inc a
-    ld (ship_x),a
-    cp 161
-    jr c,ship_update_done
-    ld a,160
-    ld (ship_x),a
-    ld a,255
-    ld (ship_dir),a
-ship_update_done:
-
-    ld a,(heli_dir)
-    cp 1
-    jr z,heli_move_right
-heli_move_left:
-    ld a,(heli_x)
-    sub 2
-    ld (heli_x),a
+    ld (hl),a
     cp 72
     ret nc
     ld a,72
-    ld (heli_x),a
+    ld (hl),a
+    inc hl
+    inc hl
     ld a,1
-    ld (heli_dir),a
+    ld (hl),a
     ret
-heli_move_right:
-    ld a,(heli_x)
+
+advance_ship_x_right:
+    dec hl
+    dec hl
+    ld a,(hl)
+    inc a
+    ld (hl),a
+    cp 161
+    ret c
+    ld a,160
+    ld (hl),a
+    inc hl
+    inc hl
+    ld a,255
+    ld (hl),a
+    ret
+
+advance_heli_x:
+    inc hl
+    inc hl
+    ld a,(hl)
+    cp 1
+    jr z,advance_heli_x_right
+    dec hl
+    dec hl
+    ld a,(hl)
+    sub 2
+    ld (hl),a
+    cp 72
+    ret nc
+    ld a,72
+    ld (hl),a
+    inc hl
+    inc hl
+    ld a,1
+    ld (hl),a
+    ret
+
+advance_heli_x_right:
+    dec hl
+    dec hl
+    ld a,(hl)
     add a,2
-    ld (heli_x),a
+    ld (hl),a
     cp 177
     ret c
     ld a,176
-    ld (heli_x),a
+    ld (hl),a
+    inc hl
+    inc hl
     ld a,255
-    ld (heli_dir),a
+    ld (hl),a
     ret
 
 advance_scrolling_sprites:
@@ -898,9 +989,21 @@ advance_scrolling_sprites:
     ld a,(ship_y)
     call advance_sprite_y
     ld (ship_y),a
+    ld a,(ship2_y)
+    call advance_sprite_y
+    ld (ship2_y),a
+    ld a,(ship3_y)
+    call advance_sprite_y
+    ld (ship3_y),a
     ld a,(heli_y)
     call advance_sprite_y
     ld (heli_y),a
+    ld a,(heli2_y)
+    call advance_sprite_y
+    ld (heli2_y),a
+    ld a,(heli3_y)
+    call advance_sprite_y
+    ld (heli3_y),a
     ret
 
 advance_sprite_y:
@@ -1043,10 +1146,26 @@ store_drawn_sprite_state_page0:
     ld (buffer0_ship_x),a
     ld a,(ship_y)
     ld (buffer0_ship_y),a
+    ld a,(ship2_x)
+    ld (buffer0_ship2_x),a
+    ld a,(ship2_y)
+    ld (buffer0_ship2_y),a
+    ld a,(ship3_x)
+    ld (buffer0_ship3_x),a
+    ld a,(ship3_y)
+    ld (buffer0_ship3_y),a
     ld a,(heli_x)
     ld (buffer0_heli_x),a
     ld a,(heli_y)
     ld (buffer0_heli_y),a
+    ld a,(heli2_x)
+    ld (buffer0_heli2_x),a
+    ld a,(heli2_y)
+    ld (buffer0_heli2_y),a
+    ld a,(heli3_x)
+    ld (buffer0_heli3_x),a
+    ld a,(heli3_y)
+    ld (buffer0_heli3_y),a
     ret
 
 store_drawn_sprite_state_page1:
@@ -1070,10 +1189,26 @@ store_drawn_sprite_state_page1:
     ld (buffer1_ship_x),a
     ld a,(ship_y)
     ld (buffer1_ship_y),a
+    ld a,(ship2_x)
+    ld (buffer1_ship2_x),a
+    ld a,(ship2_y)
+    ld (buffer1_ship2_y),a
+    ld a,(ship3_x)
+    ld (buffer1_ship3_x),a
+    ld a,(ship3_y)
+    ld (buffer1_ship3_y),a
     ld a,(heli_x)
     ld (buffer1_heli_x),a
     ld a,(heli_y)
     ld (buffer1_heli_y),a
+    ld a,(heli2_x)
+    ld (buffer1_heli2_x),a
+    ld a,(heli2_y)
+    ld (buffer1_heli2_y),a
+    ld a,(heli3_x)
+    ld (buffer1_heli3_x),a
+    ld a,(heli3_y)
+    ld (buffer1_heli3_y),a
     ret
 
 load_drawn_ship_x:
@@ -1096,6 +1231,46 @@ load_drawn_ship_y_page1:
     ld a,(buffer1_ship_y)
     ret
 
+load_drawn_ship2_x:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_ship2_x_page1
+    ld a,(buffer0_ship2_x)
+    ret
+load_drawn_ship2_x_page1:
+    ld a,(buffer1_ship2_x)
+    ret
+
+load_drawn_ship2_y:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_ship2_y_page1
+    ld a,(buffer0_ship2_y)
+    ret
+load_drawn_ship2_y_page1:
+    ld a,(buffer1_ship2_y)
+    ret
+
+load_drawn_ship3_x:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_ship3_x_page1
+    ld a,(buffer0_ship3_x)
+    ret
+load_drawn_ship3_x_page1:
+    ld a,(buffer1_ship3_x)
+    ret
+
+load_drawn_ship3_y:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_ship3_y_page1
+    ld a,(buffer0_ship3_y)
+    ret
+load_drawn_ship3_y_page1:
+    ld a,(buffer1_ship3_y)
+    ret
+
 load_drawn_heli_x:
     ld a,(screen_page_offset)
     or a
@@ -1114,6 +1289,46 @@ load_drawn_heli_y:
     ret
 load_drawn_heli_y_page1:
     ld a,(buffer1_heli_y)
+    ret
+
+load_drawn_heli2_x:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_heli2_x_page1
+    ld a,(buffer0_heli2_x)
+    ret
+load_drawn_heli2_x_page1:
+    ld a,(buffer1_heli2_x)
+    ret
+
+load_drawn_heli2_y:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_heli2_y_page1
+    ld a,(buffer0_heli2_y)
+    ret
+load_drawn_heli2_y_page1:
+    ld a,(buffer1_heli2_y)
+    ret
+
+load_drawn_heli3_x:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_heli3_x_page1
+    ld a,(buffer0_heli3_x)
+    ret
+load_drawn_heli3_x_page1:
+    ld a,(buffer1_heli3_x)
+    ret
+
+load_drawn_heli3_y:
+    ld a,(screen_page_offset)
+    or a
+    jr nz,load_drawn_heli3_y_page1
+    ld a,(buffer0_heli3_y)
+    ret
+load_drawn_heli3_y_page1:
+    ld a,(buffer1_heli3_y)
     ret
 
 set_sprite_row_phase_from_y:
@@ -1210,6 +1425,23 @@ draw_ship:
     ld (sprite_y),a
     call set_sprite_row_phase_from_y
     ld a,(ship_x)
+    jp draw_ship_common
+
+draw_ship2:
+    ld a,(ship2_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    ld a,(ship2_x)
+    jp draw_ship_common
+
+draw_ship3:
+    ld a,(ship3_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    ld a,(ship3_x)
+    jp draw_ship_common
+
+draw_ship_common:
     call set_sprite_col_phase_from_x
     ld a,0x4f
     ld (sprite_attr),a
@@ -1224,6 +1456,23 @@ draw_helicopter:
     ld (sprite_y),a
     call set_sprite_row_phase_from_y
     ld a,(heli_x)
+    jp draw_helicopter_common
+
+draw_helicopter2:
+    ld a,(heli2_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    ld a,(heli2_x)
+    jp draw_helicopter_common
+
+draw_helicopter3:
+    ld a,(heli3_y)
+    ld (sprite_y),a
+    call set_sprite_row_phase_from_y
+    ld a,(heli3_x)
+    jp draw_helicopter_common
+
+draw_helicopter_common:
     call set_sprite_col_phase_from_x
     ld a,0x4e
     ld (sprite_attr),a
@@ -1232,13 +1481,13 @@ draw_helicopter:
     jr nz,draw_helicopter_x_shifted
     ld hl,helicopter_sprite
     ld (sprite_pattern),hl
-    call draw_shifted_sprite
+    call draw_opaque_shifted_sprite
     ret
 draw_helicopter_x_shifted:
     ld hl,helicopter_shifted_sprites
     call add_sprite_x_phase_to_hl
     ld (sprite_pattern),hl
-    call draw_wide_shifted_sprite
+    call draw_opaque_wide_shifted_sprite
     ret
 
 draw_plane:
@@ -1570,6 +1819,163 @@ draw_wide_shifted_bottom_loop:
     ld (sprite_row),a
     ret
 
+draw_opaque_shifted_sprite:
+    ld a,(sprite_attr)
+    push af
+    call restore_shifted_sprite_cell
+    pop af
+    ld (sprite_attr),a
+    ld a,(sprite_phase)
+    or a
+    jr nz,draw_opaque_shifted_nonzero
+    call calc_sprite_cell_addr
+    ld de,(sprite_pattern)
+    ld hl,(cell_addr)
+    ld b,8
+draw_opaque_sprite_loop:
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc h
+    djnz draw_opaque_sprite_loop
+    call set_sprite_attr
+    ret
+
+draw_opaque_shifted_nonzero:
+    call calc_sprite_cell_addr
+    ld hl,(cell_addr)
+    ld a,(sprite_phase)
+    ld b,a
+draw_opaque_shifted_top_addr_loop:
+    inc h
+    djnz draw_opaque_shifted_top_addr_loop
+
+    ld de,(sprite_pattern)
+    ld a,(sprite_phase)
+    ld b,a
+    ld a,8
+    sub b
+    ld b,a
+draw_opaque_shifted_top_loop:
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc h
+    djnz draw_opaque_shifted_top_loop
+    call set_sprite_attr
+
+    ld a,(sprite_row)
+    inc a
+    ld (sprite_row),a
+    call calc_sprite_cell_addr
+    ld hl,(cell_addr)
+    ld de,(sprite_pattern)
+    ld a,(sprite_phase)
+    ld c,a
+    ld a,8
+    sub c
+    ld b,a
+draw_opaque_shifted_skip_loop:
+    inc de
+    djnz draw_opaque_shifted_skip_loop
+
+    ld a,(sprite_phase)
+    ld b,a
+draw_opaque_shifted_bottom_loop:
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc h
+    djnz draw_opaque_shifted_bottom_loop
+    call set_sprite_attr
+
+    ld a,(sprite_row)
+    dec a
+    ld (sprite_row),a
+    ret
+
+draw_opaque_wide_shifted_sprite:
+    ld a,(sprite_attr)
+    push af
+    call restore_wide_shifted_sprite_cell
+    pop af
+    ld (sprite_attr),a
+    ld a,(sprite_phase)
+    or a
+    jr nz,draw_opaque_wide_shifted_nonzero
+    call calc_sprite_cell_addr
+    ld de,(sprite_pattern)
+    ld hl,(cell_addr)
+    ld b,8
+draw_opaque_wide_sprite_loop:
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    ld (hl),a
+    dec l
+    inc de
+    inc h
+    djnz draw_opaque_wide_sprite_loop
+    call set_wide_sprite_attr
+    ret
+
+draw_opaque_wide_shifted_nonzero:
+    call calc_sprite_cell_addr
+    ld hl,(cell_addr)
+    ld a,(sprite_phase)
+    ld b,a
+draw_opaque_wide_shifted_top_addr_loop:
+    inc h
+    djnz draw_opaque_wide_shifted_top_addr_loop
+
+    ld de,(sprite_pattern)
+    ld a,(sprite_phase)
+    ld b,a
+    ld a,8
+    sub b
+    ld b,a
+draw_opaque_wide_shifted_top_loop:
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    ld (hl),a
+    dec l
+    inc de
+    inc h
+    djnz draw_opaque_wide_shifted_top_loop
+    push de
+    call set_wide_sprite_attr
+    pop de
+
+    ld a,(sprite_row)
+    inc a
+    ld (sprite_row),a
+    call calc_sprite_cell_addr
+    ld hl,(cell_addr)
+    ld a,(sprite_phase)
+    ld b,a
+draw_opaque_wide_shifted_bottom_loop:
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    ld (hl),a
+    dec l
+    inc de
+    inc h
+    djnz draw_opaque_wide_shifted_bottom_loop
+    call set_wide_sprite_attr
+
+    ld a,(sprite_row)
+    dec a
+    ld (sprite_row),a
+    ret
+
 draw_ship_wide_sprite:
     ld a,(sprite_attr)
     push af
@@ -1645,17 +2051,14 @@ draw_ship_wide_bottom_done:
 
 draw_ship_rows3:
     ld a,(de)
-    or (hl)
     ld (hl),a
     inc de
     inc l
     ld a,(de)
-    or (hl)
     ld (hl),a
     inc de
     inc l
     ld a,(de)
-    or (hl)
     ld (hl),a
     inc de
     inc l
@@ -1669,22 +2072,18 @@ draw_ship_rows3:
 
 draw_ship_rows4:
     ld a,(de)
-    or (hl)
     ld (hl),a
     inc de
     inc l
     ld a,(de)
-    or (hl)
     ld (hl),a
     inc de
     inc l
     ld a,(de)
-    or (hl)
     ld (hl),a
     inc de
     inc l
     ld a,(de)
-    or (hl)
     ld (hl),a
     inc de
     inc l
@@ -1930,11 +2329,35 @@ ship_y:
     db 88
 ship_dir:
     db 1
+ship2_x:
+    db 88
+ship2_y:
+    db 24
+ship2_dir:
+    db 1
+ship3_x:
+    db 152
+ship3_y:
+    db 152
+ship3_dir:
+    db 255
 heli_x:
     db 168
 heli_y:
     db 48
 heli_dir:
+    db 255
+heli2_x:
+    db 80
+heli2_y:
+    db 116
+heli2_dir:
+    db 1
+heli3_x:
+    db 128
+heli3_y:
+    db 176
+heli3_dir:
     db 255
 plane_crashed:
     db 0
@@ -1973,10 +2396,26 @@ buffer0_ship_x:
     db 120
 buffer0_ship_y:
     db 88
+buffer0_ship2_x:
+    db 88
+buffer0_ship2_y:
+    db 24
+buffer0_ship3_x:
+    db 152
+buffer0_ship3_y:
+    db 152
 buffer0_heli_x:
     db 168
 buffer0_heli_y:
     db 48
+buffer0_heli2_x:
+    db 80
+buffer0_heli2_y:
+    db 116
+buffer0_heli3_x:
+    db 128
+buffer0_heli3_y:
+    db 176
 
 buffer1_bank0_y:
     db 16
@@ -1998,10 +2437,26 @@ buffer1_ship_x:
     db 120
 buffer1_ship_y:
     db 88
+buffer1_ship2_x:
+    db 88
+buffer1_ship2_y:
+    db 24
+buffer1_ship3_x:
+    db 152
+buffer1_ship3_y:
+    db 152
 buffer1_heli_x:
     db 168
 buffer1_heli_y:
     db 48
+buffer1_heli2_x:
+    db 80
+buffer1_heli2_y:
+    db 116
+buffer1_heli3_x:
+    db 128
+buffer1_heli3_y:
+    db 176
 
 align 256
 prefix_mask:
