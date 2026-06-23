@@ -1698,7 +1698,6 @@ draw_shifted_top_loop:
     inc de
     inc h
     djnz draw_shifted_top_loop
-    call set_sprite_attr
 
     ld a,(sprite_row)
     inc a
@@ -1729,6 +1728,7 @@ draw_shifted_bottom_loop:
     ld a,(sprite_row)
     dec a
     ld (sprite_row),a
+    call set_sprite_attr
     ret
 
 draw_wide_shifted_sprite:
@@ -1788,9 +1788,6 @@ draw_wide_shifted_top_loop:
     inc de
     inc h
     djnz draw_wide_shifted_top_loop
-    push de
-    call set_wide_sprite_attr
-    pop de
 
     ld a,(sprite_row)
     inc a
@@ -1817,6 +1814,7 @@ draw_wide_shifted_bottom_loop:
     ld a,(sprite_row)
     dec a
     ld (sprite_row),a
+    call set_wide_sprite_attr
     ret
 
 draw_opaque_shifted_sprite:
@@ -1864,7 +1862,6 @@ draw_opaque_shifted_top_loop:
     inc de
     inc h
     djnz draw_opaque_shifted_top_loop
-    call set_sprite_attr
 
     ld a,(sprite_row)
     inc a
@@ -1905,6 +1902,7 @@ draw_opaque_shifted_bottom_clear_loop:
     ld a,(sprite_row)
     dec a
     ld (sprite_row),a
+    call set_sprite_attr
     ret
 
 draw_opaque_wide_shifted_sprite:
@@ -1958,9 +1956,6 @@ draw_opaque_wide_shifted_top_loop:
     inc de
     inc h
     djnz draw_opaque_wide_shifted_top_loop
-    push de
-    call set_wide_sprite_attr
-    pop de
 
     ld a,(sprite_row)
     inc a
@@ -1992,6 +1987,7 @@ draw_opaque_wide_shifted_bottom_loop:
     ld a,(sprite_row)
     dec a
     ld (sprite_row),a
+    call set_wide_sprite_attr
     ret
 
 clear_wide_rows:
@@ -2057,9 +2053,6 @@ draw_ship_wide_top_clear_done:
 draw_ship_wide_top4:
     call draw_ship_rows4
 draw_ship_wide_top_done:
-    push de
-    call set_ship_sprite_attr
-    pop de
 
     ld a,(sprite_row)
     inc a
@@ -2094,6 +2087,7 @@ draw_ship_wide_bottom_clear_done:
     ld a,(sprite_row)
     dec a
     ld (sprite_row),a
+    call set_ship_sprite_attr
     ret
 
 draw_ship_rows3:
