@@ -677,6 +677,8 @@ update_and_draw_sprites:
     ret
 
 restore_moving_sprites:
+    call restore_bank_objects
+
     ld a,11
     ld (sprite_row),a
     ld a,(ship_col)
@@ -695,6 +697,9 @@ update_moving_sprites:
     inc a
     ld (frame_counter),a
     ld b,a
+    push bc
+    call update_bank_scroll
+    pop bc
 
     and 7
     jr nz,ship_update_done
@@ -753,46 +758,159 @@ heli_move_right:
     ld (heli_dir),a
     ret
 
+update_bank_scroll:
+    ld a,(bank_scroll_accum)
+    ld c,a
+    ld a,(speed_samples)
+    add a,c
+    cp 4
+    jr nc,bank_scroll_step
+    ld (bank_scroll_accum),a
+    ret
+bank_scroll_step:
+    sub 4
+    ld (bank_scroll_accum),a
+    call advance_bank_objects
+    ret
+
+advance_bank_objects:
+    ld a,(bank0_row)
+    call advance_bank_row
+    ld (bank0_row),a
+    ld a,(bank1_row)
+    call advance_bank_row
+    ld (bank1_row),a
+    ld a,(bank2_row)
+    call advance_bank_row
+    ld (bank2_row),a
+    ld a,(bank3_row)
+    call advance_bank_row
+    ld (bank3_row),a
+    ret
+
+advance_bank_row:
+    inc a
+    cp 24
+    ret c
+    xor a
+    ret
+
+restore_bank_objects:
+    ld a,(bank0_row)
+    ld (sprite_row),a
+    ld a,(bank0_col)
+    ld (sprite_col),a
+    call restore_sprite_cell
+
+    ld a,(bank1_row)
+    ld (sprite_row),a
+    ld a,(bank1_col)
+    ld (sprite_col),a
+    call restore_sprite_cell
+
+    ld a,(bank2_row)
+    ld (sprite_row),a
+    ld a,(bank2_col)
+    ld (sprite_col),a
+    call restore_sprite_cell
+
+    ld a,(bank3_row)
+    ld (sprite_row),a
+    ld a,(bank3_col)
+    ld (sprite_col),a
+    call restore_sprite_cell
+    ret
+
 draw_bank_objects:
-    ld a,5
+    ld a,(bank0_row)
     ld (sprite_row),a
-    ld a,2
-    ld (sprite_col),a
+    call set_left_bank_sprite_col
+    ld a,(sprite_col)
+    ld (bank0_col),a
     ld hl,tree_sprite
     ld (sprite_pattern),hl
     ld a,0x20
     ld (sprite_attr),a
     call draw_sprite
 
-    ld a,8
+    ld a,(bank1_row)
     ld (sprite_row),a
-    ld a,28
-    ld (sprite_col),a
+    call set_right_bank_sprite_col
+    ld a,(sprite_col)
+    ld (bank1_col),a
     ld hl,tank_sprite
     ld (sprite_pattern),hl
     ld a,0x20
     ld (sprite_attr),a
     call draw_sprite
 
-    ld a,15
+    ld a,(bank2_row)
     ld (sprite_row),a
-    ld a,3
-    ld (sprite_col),a
+    call set_left_bank_sprite_col
+    ld a,(sprite_col)
+    ld (bank2_col),a
     ld hl,tank_sprite
     ld (sprite_pattern),hl
     ld a,0x20
     ld (sprite_attr),a
     call draw_sprite
 
-    ld a,18
+    ld a,(bank3_row)
     ld (sprite_row),a
-    ld a,26
-    ld (sprite_col),a
+    call set_right_bank_sprite_col
+    ld a,(sprite_col)
+    ld (bank3_col),a
     ld hl,tree_sprite
     ld (sprite_pattern),hl
     ld a,0x20
     ld (sprite_attr),a
     call draw_sprite
+    ret
+
+set_left_bank_sprite_col:
+    ld a,(sprite_row)
+    add a,a
+    add a,a
+    add a,2
+    ld b,a
+    ld a,(start_lo)
+    add a,b
+    ld l,a
+    ld a,(start_page)
+    jr nc,left_sprite_page_ready
+    inc a
+    and 3
+left_sprite_page_ready:
+    add a,HIGH(left_bank)
+    ld h,a
+    ld a,(hl)
+    call x_to_column
+    or a
+    jr z,left_sprite_col_ready
+    dec a
+left_sprite_col_ready:
+    ld (sprite_col),a
+    ret
+
+set_right_bank_sprite_col:
+    ld a,(sprite_row)
+    add a,a
+    add a,a
+    add a,2
+    ld b,a
+    ld a,(start_lo)
+    add a,b
+    ld l,a
+    ld a,(start_page)
+    jr nc,right_sprite_page_ready
+    inc a
+    and 3
+right_sprite_page_ready:
+    add a,HIGH(right_bank)
+    ld h,a
+    ld a,(hl)
+    call x_to_column
+    ld (sprite_col),a
     ret
 
 draw_ship:
@@ -1047,6 +1165,24 @@ cell_addr:
     dw 0
 frame_counter:
     db 0
+bank_scroll_accum:
+    db 0
+bank0_row:
+    db 2
+bank0_col:
+    db 2
+bank1_row:
+    db 8
+bank1_col:
+    db 28
+bank2_row:
+    db 14
+bank2_col:
+    db 3
+bank3_row:
+    db 20
+bank3_col:
+    db 26
 ship_col:
     db 15
 ship_dir:

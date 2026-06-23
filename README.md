@@ -87,12 +87,14 @@ background:
 
 - a white player plane near the bottom of the river
 - a ship and helicopter over the water, moving horizontally
-- simple tree and tank glyphs on the land near both banks
+- simple tree and tank glyphs that scroll down along both banks
 
 Sprite cells are redrawn over the reconstructed river background each frame.
 The plane switches to a crash glyph if the current river banks get too close
 to its fixed bottom-screen position.  This is intentionally a coarse renderer
-test, not a final gameplay or collision system.
+test, not a final gameplay or collision system.  Bank objects recompute their
+column from the current river geometry as they move down, so they follow the
+jagged bank instead of staying fixed on the screen.
 
 The Timex build uses Timex video mode 1: screen 0 at `0x4000` and screen 1 at
 `0x6000`.  Each screen remembers which river index it contains, so the dirty
