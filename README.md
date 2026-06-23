@@ -51,10 +51,9 @@ ink on blue paper.  During animation the attribute area is not touched.
 
 In the bitmap, bit `1` means land and bit `0` means water.  Full land and full
 water cells are therefore `0xff` and `0x00`.  Edge cells are rebuilt from
-`prefix_mask` and `suffix_mask` tables.  The renderer also shapes each edge
-sample: the second scanline of a 2-pixel sample leans one pixel toward the
-next river sample, so straight banks stay clean while turning banks get less
-blocky 8 x 8 glyphs.
+`prefix_mask` and `suffix_mask` tables.  Each 2-pixel river sample is drawn as
+two identical bitmap scanlines; this keeps normal-frame rendering cheap enough
+for the 50 Hz budget.
 
 ## River Representation
 
@@ -77,10 +76,9 @@ The full 32 x 24 cell screen is rendered only during startup and after `R`.
 Normal frames never copy the 6144-byte bitmap and never redraw all 768 cells.
 
 For each of the 24 tile rows, the renderer examines the four 2-pixel samples
-covered by that row plus one lookahead sample used by the shaped edge glyph.
-It computes the byte-column range crossed by the old left bank, the new left
-bank, the old right bank, and the new right bank.  It then redraws only the
-union of the old and new range for each bank.
+covered by that row.  It computes the byte-column range crossed by the old
+left bank, the new left bank, the old right bank, and the new right bank.  It
+then redraws only the union of the old and new range for each bank.
 
 There is no separate old-pixel map.  The two ring buffers are the geometry
 map, and `old_start_idx` tells the renderer which geometry was visible on the
@@ -89,27 +87,17 @@ new geometry across the old-and-new dirty range.
 
 Because each bank still moves by at most one pixel per sample, the usual dirty
 width is one or two cells per bank per tile row, sometimes three cells around
-strong turns or byte boundaries.  The exact runtime values are measured by the
-program and stored in:
-
-- `cells_written`
-- `bitmap_bytes_written`
-- `maximum_cells_written`
-- `frame_counter`
-
-The generated map file (`build/attribute-raid.map`) lists these labels for
-emulator debuggers.
+strong turns or byte boundaries.
 
 ## Profiling
 
-The border is black while idle, yellow during new-sample generation, and red
-during dirty rendering.  This is intended to show whether generation plus
-rendering fits in one 50 Hz frame.
+The border is kept black during normal animation.  Earlier development builds
+used yellow/red border profiling, but that made the emulator visibly flash
+while the renderer was being tuned.
 
 In the current build environment the TAP structure and checksums were verified,
 but a visual 50 Hz emulator run was not completed because the ZEsarUX control
-server was not available on `localhost:10000`.  Use the border colors and the
-diagnostic labels above for the actual runtime measurement in an emulator.
+server was not available on `localhost:10000`.
 
 The algorithm differs from classic full-screen scrolling by never shifting
 screen memory.  The visible river moves because screen rows read different

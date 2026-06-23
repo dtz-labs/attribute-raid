@@ -8,7 +8,6 @@ start:
     call init_attributes
     call init_river
     call full_redraw
-    call reset_counters
     ei
 
 main_loop:
@@ -16,7 +15,6 @@ main_loop:
     out (0xfe),a
     halt
     call read_keyboard
-    call inc_frame_counter
 
     ld a,(paused)
     or a
@@ -24,9 +22,6 @@ main_loop:
 
     ld a,(start_idx)
     ld (old_start_idx),a
-
-    ld a,6
-    out (0xfe),a
 
     ld a,(speed_samples)
     cp 2
@@ -57,12 +52,7 @@ scroll_four_pixels:
     call generate_one_at_index
 
 generation_done:
-    ld a,2
-    out (0xfe),a
     call render_dirty
-    call update_max_cells
-    xor a
-    out (0xfe),a
     jr main_loop
 
 init_attributes:
@@ -81,7 +71,6 @@ init_attr_loop:
 reinitialize_demo:
     call init_river
     call full_redraw
-    call reset_counters
     ret
 
 init_river:
@@ -236,7 +225,6 @@ width_done:
     ret
 
 full_redraw:
-    call reset_counters
     ld d,0
 full_row_loop:
     ld e,0
@@ -255,7 +243,6 @@ full_col_loop:
     ret
 
 render_dirty:
-    call reset_counters
     xor a
     ld (row_var),a
     ld a,(old_start_idx)
@@ -306,14 +293,13 @@ dirty_row_loop:
     ret
 
 calc_bank_range:
-    ; Five samples are checked because the second scanline of a sample can
-    ; lean toward the next sample to make a less blocky bank glyph.
+    ; Four 2-pixel samples make one 8-pixel tile row.
     ld l,a
     ld a,(hl)
     call x_to_column
     ld b,a
     ld c,a
-    ld d,4
+    ld d,3
 calc_range_loop:
     inc l
     ld a,l
@@ -379,15 +365,6 @@ render_cell:
     ld a,e
     ld (cell_col),a
 
-    ld hl,(cells_written)
-    inc hl
-    ld (cells_written),hl
-
-    ld hl,(bitmap_bytes_written)
-    ld de,8
-    add hl,de
-    ld (bitmap_bytes_written),hl
-
     ld a,(cell_row)
     add a,a
     ld e,a
@@ -419,20 +396,11 @@ render_cell:
     ret
 
 render_cell_sample:
-    xor a
-    ld (edge_phase),a
     ld a,(cell_sample)
     call make_cell_byte
     ld hl,(cell_addr)
     ld (hl),a
     inc h
-
-    ld (cell_addr),hl
-    ld a,1
-    ld (edge_phase),a
-    ld a,(cell_sample)
-    call make_cell_byte
-    ld hl,(cell_addr)
     ld (hl),a
     inc h
     ld (cell_addr),hl
@@ -449,8 +417,6 @@ make_cell_byte:
     ld b,(hl)
     ld h,HIGH(right_bank)
     ld c,(hl)
-
-    call apply_edge_shape
 
     ld a,(cell_col)
     add a,a
@@ -498,46 +464,6 @@ make_right_partial:
 make_right_full:
     ld a,255
     or e
-    ret
-
-apply_edge_shape:
-    ; For the second scanline of each 2-pixel sample, move each bank one
-    ; pixel toward the next sample.  Straight banks stay straight; turns get
-    ; asymmetric 8x8 glyphs without storing extra bitmap state.
-    ld a,(edge_phase)
-    or a
-    ret z
-
-    ld a,(cell_sample)
-    inc a
-    and 127
-    ld l,a
-    ld h,HIGH(left_bank)
-    ld a,(hl)
-    cp b
-    jr z,shape_left_done
-    jr c,shape_left_minus
-    inc b
-    jr shape_left_done
-
-shape_left_minus:
-    dec b
-
-shape_left_done:
-    ld a,(cell_sample)
-    inc a
-    and 127
-    ld l,a
-    ld h,HIGH(right_bank)
-    ld a,(hl)
-    cp c
-    ret z
-    jr c,shape_right_minus
-    inc c
-    ret
-
-shape_right_minus:
-    dec c
     ret
 
 read_keyboard:
@@ -589,35 +515,6 @@ read_r_key:
 r_not_pressed:
     xor a
     ld (r_down),a
-    ret
-
-reset_counters:
-    ld hl,0
-    ld (cells_written),hl
-    ld (bitmap_bytes_written),hl
-    ret
-
-inc_frame_counter:
-    ld hl,(frame_counter)
-    inc hl
-    ld (frame_counter),hl
-    ret
-
-update_max_cells:
-    ld hl,(cells_written)
-    ld de,(maximum_cells_written)
-    ld a,h
-    cp d
-    jr c,max_cells_done
-    jr nz,max_cells_store
-    ld a,l
-    cp e
-    jr c,max_cells_done
-    jr z,max_cells_done
-max_cells_store:
-    ld hl,(cells_written)
-    ld (maximum_cells_written),hl
-max_cells_done:
     ret
 
 screen_row_table:
@@ -679,18 +576,7 @@ cell_col:
     db 0
 cell_sample:
     db 0
-edge_phase:
-    db 0
 cell_addr:
-    dw 0
-
-frame_counter:
-    dw 0
-cells_written:
-    dw 0
-bitmap_bytes_written:
-    dw 0
-maximum_cells_written:
     dw 0
 
 align 256
