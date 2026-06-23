@@ -151,8 +151,8 @@ pick_new_motion:
     call lfsr_next
     ld b,a
     ld a,b
-    and 31
-    add a,8
+    and 7
+    add a,2
     ld (segment_timer),a
 
     ld a,b
@@ -523,16 +523,16 @@ screen_row_table:
     dw 0x5000,0x5020,0x5040,0x5060,0x5080,0x50a0,0x50c0,0x50e0
 
 motion_table:
-    ; Signed bank velocities for longer curve segments.  Shared directions
-    ; move the whole river sideways; opposite directions change river width.
-    db 255,255
-    db 1,1
-    db 255,255
-    db 1,1
+    ; Signed bank velocities for short jagged segments.  One-sided moves
+    ; roughen either edge while shared/opposite moves bend or narrow the river.
+    db 255,0
+    db 1,0
+    db 0,255
+    db 0,1
     db 255,1
     db 1,255
-    db 0,1
-    db 255,0
+    db 255,255
+    db 1,1
 
 start_idx:
     db 0

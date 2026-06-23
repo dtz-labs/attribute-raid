@@ -64,7 +64,9 @@ scanlines.  Two 128-byte ring buffers store the banks:
 - `right_bank[i]`: first right-land pixel
 
 Only 96 samples are visible on the 192-pixel screen, but 128 entries make
-wrapping cheap with `AND 127`.
+wrapping cheap with `AND 127`.  Bank motion is pseudo-random and deterministic:
+an 8-bit LFSR chooses short 2-9 sample movement segments, so the visible edges
+are jagged without requiring random work inside the renderer.
 
 Scrolling does not move the bitmap.  Each frame changes the logical start
 index of the ring buffer by one sample for 2 px mode, or by two samples for
