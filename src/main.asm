@@ -7,7 +7,7 @@ start:
     di
     call init_attributes
     call init_river
-    call full_redraw
+    call init_video_buffers
     ei
 
 main_loop:
@@ -20,28 +20,41 @@ main_loop:
     or a
     jr nz,main_loop
 
-    ld a,(start_idx)
-    ld (old_start_idx),a
+    ld a,(start_lo)
+    ld (old_start_lo),a
+    ld a,(start_page)
+    ld (old_start_page),a
 
     ld a,(speed_samples)
     cp 2
     jr z,scroll_four_pixels
 
 scroll_two_pixels:
-    ld a,(start_idx)
-    dec a
-    ld (start_idx),a
+    call dec_start_index
     jr generation_done
 
 scroll_four_pixels:
-    ld a,(start_idx)
-    dec a
-    dec a
-    ld (start_idx),a
+    call dec_start_index
+    call dec_start_index
 
 generation_done:
+    call prepare_frame_buffer
     call render_dirty
+    call update_and_draw_sprites
+    call present_frame
     jr main_loop
+
+dec_start_index:
+    ld a,(start_lo)
+    dec a
+    ld (start_lo),a
+    cp 255
+    ret nz
+    ld a,(start_page)
+    dec a
+    and 3
+    ld (start_page),a
+    ret
 
 init_attributes:
     ld hl,0x5800
@@ -54,11 +67,48 @@ init_attr_loop:
     ld a,b
     or c
     jr nz,init_attr_loop
+
+    ld hl,0x7800
+    ld bc,768
+    ld d,0x4c
+init_attr2_loop:
+    ld (hl),d
+    inc hl
+    dec bc
+    ld a,b
+    or c
+    jr nz,init_attr2_loop
     ret
 
 reinitialize_demo:
     call init_river
+    call init_video_buffers
+    ret
+
+init_video_buffers:
+    xor a
+    ld (screen_page_offset),a
+    ld (display_page),a
     call full_redraw
+    call update_and_draw_sprites
+
+    ld a,(timex_enabled)
+    or a
+    ret z
+
+    ld a,0x20
+    ld (screen_page_offset),a
+    call full_redraw
+    call update_and_draw_sprites
+
+    xor a
+    out (0xff),a
+    ld (screen_page_offset),a
+    ld (display_page),a
+    ld (buffer0_lo),a
+    ld (buffer0_page),a
+    ld (buffer1_lo),a
+    ld (buffer1_page),a
     ret
 
 init_river:
@@ -75,14 +125,20 @@ init_river:
     ld a,0xa7
     ld (lfsr),a
     xor a
-    ld (start_idx),a
+    ld (start_lo),a
+    ld (start_page),a
 
+    ld d,0
     ld e,0
 init_river_loop:
     push de
     call generate_one_at_index
     pop de
     inc e
+    jr nz,init_river_loop
+    inc d
+    ld a,d
+    cp 4
     jr nz,init_river_loop
     ret
 
@@ -105,12 +161,16 @@ generate_one_at_index:
     call clamp_banks
     pop de
 
-    ld h,HIGH(left_bank)
+    ld a,d
+    add a,HIGH(left_bank)
+    ld h,a
     ld l,e
     ld a,(gen_left)
     ld (hl),a
 
-    ld h,HIGH(right_bank)
+    ld a,d
+    add a,HIGH(right_bank)
+    ld h,a
     ld l,e
     ld a,(gen_right)
     ld (hl),a
@@ -218,52 +278,147 @@ full_col_loop:
     jr nz,full_row_loop
     ret
 
+prepare_frame_buffer:
+    ld a,(timex_enabled)
+    or a
+    jr nz,prepare_timex_frame
+    xor a
+    ld (screen_page_offset),a
+    ret
+
+prepare_timex_frame:
+    ld a,(display_page)
+    or a
+    jr z,prepare_timex_page1
+
+prepare_timex_page0:
+    xor a
+    ld (screen_page_offset),a
+    ld a,(buffer0_lo)
+    ld (old_start_lo),a
+    ld a,(buffer0_page)
+    ld (old_start_page),a
+    ret
+
+prepare_timex_page1:
+    ld a,0x20
+    ld (screen_page_offset),a
+    ld a,(buffer1_lo)
+    ld (old_start_lo),a
+    ld a,(buffer1_page)
+    ld (old_start_page),a
+    ret
+
+present_frame:
+    ld a,(timex_enabled)
+    or a
+    ret z
+    ld a,(screen_page_offset)
+    or a
+    jr nz,present_timex_page1
+
+present_timex_page0:
+    xor a
+    out (0xff),a
+    ld (display_page),a
+    ld a,(start_lo)
+    ld (buffer0_lo),a
+    ld a,(start_page)
+    ld (buffer0_page),a
+    ret
+
+present_timex_page1:
+    ld a,1
+    out (0xff),a
+    ld (display_page),a
+    ld a,(start_lo)
+    ld (buffer1_lo),a
+    ld a,(start_page)
+    ld (buffer1_page),a
+    ret
+
 render_dirty:
     xor a
     ld (row_var),a
-    ld a,(old_start_idx)
-    ld (old_row_index),a
-    ld a,(start_idx)
-    ld (new_row_index),a
+    ld a,(old_start_lo)
+    ld (old_row_lo),a
+    ld a,(old_start_page)
+    ld (old_row_page),a
+    ld a,(start_lo)
+    ld (new_row_lo),a
+    ld a,(start_page)
+    ld (new_row_page),a
 
 dirty_row_loop:
-    ld h,HIGH(left_bank)
-    ld a,(old_row_index)
+    ld a,HIGH(left_bank)
+    call set_range_bank
+    ld a,(old_row_page)
+    add a,HIGH(left_bank)
+    ld h,a
+    ld a,(old_row_lo)
     call calc_bank_range
     ld a,b
     ld (range_min),a
     ld a,c
     ld (range_max),a
 
-    ld h,HIGH(left_bank)
-    ld a,(new_row_index)
+    ld a,(new_row_page)
+    add a,HIGH(left_bank)
+    ld h,a
+    ld a,(new_row_lo)
     call calc_bank_range
     call merge_and_render_range
 
-    ld h,HIGH(right_bank)
-    ld a,(old_row_index)
+    ld a,HIGH(right_bank)
+    call set_range_bank
+    ld a,(old_row_page)
+    add a,HIGH(right_bank)
+    ld h,a
+    ld a,(old_row_lo)
     call calc_bank_range
     ld a,b
     ld (range_min),a
     ld a,c
     ld (range_max),a
 
-    ld h,HIGH(right_bank)
-    ld a,(new_row_index)
+    ld a,(new_row_page)
+    add a,HIGH(right_bank)
+    ld h,a
+    ld a,(new_row_lo)
     call calc_bank_range
     call merge_and_render_range
 
-    ld a,(old_row_index)
+    ld a,(old_row_lo)
     add a,4
-    ld (old_row_index),a
-    ld a,(new_row_index)
+    ld (old_row_lo),a
+    jr nc,old_row_advanced
+    ld a,(old_row_page)
+    inc a
+    and 3
+    ld (old_row_page),a
+old_row_advanced:
+    ld a,(new_row_lo)
     add a,4
-    ld (new_row_index),a
+    ld (new_row_lo),a
+    jr nc,new_row_advanced
+    ld a,(new_row_page)
+    inc a
+    and 3
+    ld (new_row_page),a
+new_row_advanced:
     ld a,(row_var)
     inc a
     ld (row_var),a
     cp 24
-    jr nz,dirty_row_loop
+    jr z,dirty_rows_done
+    jp dirty_row_loop
+dirty_rows_done:
+    ret
+
+set_range_bank:
+    ld (range_base_high),a
+    add a,4
+    ld (range_end_high),a
     ret
 
 calc_bank_range:
@@ -276,6 +431,14 @@ calc_bank_range:
     ld d,3
 calc_range_loop:
     inc l
+    jr nz,calc_range_no_wrap
+    inc h
+    ld a,(range_end_high)
+    cp h
+    jr nz,calc_range_no_wrap
+    ld a,(range_base_high)
+    ld h,a
+calc_range_no_wrap:
     ld a,(hl)
     call x_to_column
     cp b
@@ -346,6 +509,9 @@ render_cell:
     inc hl
     ld d,(hl)
     ex de,hl
+    ld a,(screen_page_offset)
+    add a,h
+    ld h,a
     ld a,(cell_col)
     add a,l
     ld l,a
@@ -355,9 +521,15 @@ render_cell:
     add a,a
     add a,a
     ld b,a
-    ld a,(start_idx)
+    ld a,(start_lo)
     add a,b
-    ld (cell_sample),a
+    ld (cell_sample_lo),a
+    ld a,(start_page)
+    jr nc,cell_sample_page_ready
+    inc a
+    and 3
+cell_sample_page_ready:
+    ld (cell_sample_page),a
 
     call render_cell_sample
     call render_cell_sample
@@ -366,7 +538,6 @@ render_cell:
     ret
 
 render_cell_sample:
-    ld a,(cell_sample)
     call make_cell_byte
     ld hl,(cell_addr)
     ld (hl),a
@@ -375,16 +546,26 @@ render_cell_sample:
     inc h
     ld (cell_addr),hl
 
-    ld a,(cell_sample)
+    ld a,(cell_sample_lo)
     inc a
-    ld (cell_sample),a
+    ld (cell_sample_lo),a
+    ret nz
+    ld a,(cell_sample_page)
+    inc a
+    and 3
+    ld (cell_sample_page),a
     ret
 
 make_cell_byte:
+    ld a,(cell_sample_page)
+    add a,HIGH(left_bank)
+    ld h,a
+    ld a,(cell_sample_lo)
     ld l,a
-    ld h,HIGH(left_bank)
     ld b,(hl)
-    ld h,HIGH(right_bank)
+    ld a,(cell_sample_page)
+    add a,HIGH(right_bank)
+    ld h,a
     ld c,(hl)
 
     ld a,(cell_col)
@@ -486,10 +667,285 @@ r_not_pressed:
     ld (r_down),a
     ret
 
+update_and_draw_sprites:
+    call restore_moving_sprites
+    call update_moving_sprites
+    call draw_bank_objects
+    call draw_ship
+    call draw_helicopter
+    call draw_plane
+    ret
+
+restore_moving_sprites:
+    ld a,11
+    ld (sprite_row),a
+    ld a,(ship_col)
+    ld (sprite_col),a
+    call restore_sprite_cell
+
+    ld a,6
+    ld (sprite_row),a
+    ld a,(heli_col)
+    ld (sprite_col),a
+    call restore_sprite_cell
+    ret
+
+update_moving_sprites:
+    ld a,(frame_counter)
+    inc a
+    ld (frame_counter),a
+    ld b,a
+
+    and 7
+    jr nz,ship_update_done
+    ld a,(ship_dir)
+    cp 1
+    jr z,ship_move_right
+ship_move_left:
+    ld a,(ship_col)
+    dec a
+    ld (ship_col),a
+    cp 11
+    jr nc,ship_update_done
+    ld a,11
+    ld (ship_col),a
+    ld a,1
+    ld (ship_dir),a
+    jr ship_update_done
+ship_move_right:
+    ld a,(ship_col)
+    inc a
+    ld (ship_col),a
+    cp 21
+    jr c,ship_update_done
+    ld a,20
+    ld (ship_col),a
+    ld a,255
+    ld (ship_dir),a
+ship_update_done:
+
+    ld a,b
+    and 3
+    ret nz
+    ld a,(heli_dir)
+    cp 1
+    jr z,heli_move_right
+heli_move_left:
+    ld a,(heli_col)
+    dec a
+    ld (heli_col),a
+    cp 9
+    ret nc
+    ld a,9
+    ld (heli_col),a
+    ld a,1
+    ld (heli_dir),a
+    ret
+heli_move_right:
+    ld a,(heli_col)
+    inc a
+    ld (heli_col),a
+    cp 23
+    ret c
+    ld a,22
+    ld (heli_col),a
+    ld a,255
+    ld (heli_dir),a
+    ret
+
+draw_bank_objects:
+    ld a,5
+    ld (sprite_row),a
+    ld a,2
+    ld (sprite_col),a
+    ld hl,tree_sprite
+    ld (sprite_pattern),hl
+    ld a,0x20
+    ld (sprite_attr),a
+    call draw_sprite
+
+    ld a,8
+    ld (sprite_row),a
+    ld a,28
+    ld (sprite_col),a
+    ld hl,tank_sprite
+    ld (sprite_pattern),hl
+    ld a,0x20
+    ld (sprite_attr),a
+    call draw_sprite
+
+    ld a,15
+    ld (sprite_row),a
+    ld a,3
+    ld (sprite_col),a
+    ld hl,tank_sprite
+    ld (sprite_pattern),hl
+    ld a,0x20
+    ld (sprite_attr),a
+    call draw_sprite
+
+    ld a,18
+    ld (sprite_row),a
+    ld a,26
+    ld (sprite_col),a
+    ld hl,tree_sprite
+    ld (sprite_pattern),hl
+    ld a,0x20
+    ld (sprite_attr),a
+    call draw_sprite
+    ret
+
+draw_ship:
+    ld a,11
+    ld (sprite_row),a
+    ld a,(ship_col)
+    ld (sprite_col),a
+    ld hl,ship_sprite
+    ld (sprite_pattern),hl
+    ld a,0x4f
+    ld (sprite_attr),a
+    call draw_sprite
+    ret
+
+draw_helicopter:
+    ld a,6
+    ld (sprite_row),a
+    ld a,(heli_col)
+    ld (sprite_col),a
+    ld hl,helicopter_sprite
+    ld (sprite_pattern),hl
+    ld a,0x4e
+    ld (sprite_attr),a
+    call draw_sprite
+    ret
+
+draw_plane:
+    call check_plane_crash
+    ld a,22
+    ld (sprite_row),a
+    ld a,15
+    ld (sprite_col),a
+    ld a,(plane_crashed)
+    or a
+    jr nz,draw_crash_sprite
+    ld hl,plane_sprite
+    ld (sprite_pattern),hl
+    ld a,0x4f
+    ld (sprite_attr),a
+    call draw_sprite
+    ret
+draw_crash_sprite:
+    ld hl,crash_sprite
+    ld (sprite_pattern),hl
+    ld a,0x4a
+    ld (sprite_attr),a
+    call draw_sprite
+    ret
+
+check_plane_crash:
+    ld a,(start_lo)
+    add a,88
+    ld l,a
+    ld a,(start_page)
+    jr nc,plane_sample_page_ready
+    inc a
+    and 3
+plane_sample_page_ready:
+    ld b,a
+    add a,HIGH(left_bank)
+    ld h,a
+    ld a,(hl)
+    cp 112
+    jr nc,plane_is_crashed
+    ld a,b
+    add a,HIGH(right_bank)
+    ld h,a
+    ld a,(hl)
+    cp 136
+    jr c,plane_is_crashed
+    xor a
+    ld (plane_crashed),a
+    ret
+plane_is_crashed:
+    ld a,1
+    ld (plane_crashed),a
+    ret
+
+restore_sprite_cell:
+    ld a,(sprite_row)
+    ld d,a
+    ld a,(sprite_col)
+    ld e,a
+    call render_cell
+    ld a,0x4c
+    ld (sprite_attr),a
+    call set_sprite_attr
+    ret
+
+draw_sprite:
+    call calc_sprite_cell_addr
+    ld de,(sprite_pattern)
+    ld hl,(cell_addr)
+    ld b,8
+draw_sprite_loop:
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc h
+    djnz draw_sprite_loop
+    call set_sprite_attr
+    ret
+
+calc_sprite_cell_addr:
+    ld a,(sprite_row)
+    add a,a
+    ld e,a
+    ld d,0
+    ld hl,screen_row_table
+    add hl,de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    ex de,hl
+    ld a,(screen_page_offset)
+    add a,h
+    ld h,a
+    ld a,(sprite_col)
+    add a,l
+    ld l,a
+    ld (cell_addr),hl
+    ret
+
+set_sprite_attr:
+    ld a,(sprite_row)
+    add a,a
+    ld e,a
+    ld d,0
+    ld hl,attr_row_table
+    add hl,de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    ex de,hl
+    ld a,(screen_page_offset)
+    add a,h
+    ld h,a
+    ld a,(sprite_col)
+    add a,l
+    ld l,a
+    ld a,(sprite_attr)
+    ld (hl),a
+    ret
+
 screen_row_table:
     dw 0x4000,0x4020,0x4040,0x4060,0x4080,0x40a0,0x40c0,0x40e0
     dw 0x4800,0x4820,0x4840,0x4860,0x4880,0x48a0,0x48c0,0x48e0
     dw 0x5000,0x5020,0x5040,0x5060,0x5080,0x50a0,0x50c0,0x50e0
+
+attr_row_table:
+    dw 0x5800,0x5820,0x5840,0x5860,0x5880,0x58a0,0x58c0,0x58e0
+    dw 0x5900,0x5920,0x5940,0x5960,0x5980,0x59a0,0x59c0,0x59e0
+    dw 0x5a00,0x5a20,0x5a40,0x5a60,0x5a80,0x5aa0,0x5ac0,0x5ae0
 
 motion_table:
     ; Signed bank velocities for short jagged segments.  One-sided moves
@@ -503,9 +959,26 @@ motion_table:
     db 255,255
     db 1,1
 
-start_idx:
+plane_sprite:
+    db 0x18,0x3c,0x7e,0xff,0x3c,0x3c,0x66,0x00
+crash_sprite:
+    db 0x81,0x42,0x24,0x18,0x18,0x24,0x42,0x81
+ship_sprite:
+    db 0x00,0x18,0x3c,0x7e,0xff,0x7e,0x24,0x00
+helicopter_sprite:
+    db 0xff,0x18,0x7e,0xdb,0x7e,0x18,0x24,0x00
+tree_sprite:
+    db 0x18,0x3c,0x7e,0x3c,0x18,0x18,0x3c,0x00
+tank_sprite:
+    db 0x00,0x18,0x7e,0xff,0x7e,0xdb,0xff,0x00
+
+start_lo:
     db 0
-old_start_idx:
+start_page:
+    db 0
+old_start_lo:
+    db 0
+old_start_page:
     db 0
 speed_samples:
     db 1
@@ -529,24 +1002,69 @@ segment_timer:
 lfsr:
     db 0xa7
 
+timex_enabled:
+    db TIMEX_DOUBLE_BUFFER
+screen_page_offset:
+    db 0
+display_page:
+    db 0
+buffer0_lo:
+    db 0
+buffer0_page:
+    db 0
+buffer1_lo:
+    db 0
+buffer1_page:
+    db 0
+
 row_var:
     db 0
-old_row_index:
+old_row_lo:
     db 0
-new_row_index:
+old_row_page:
+    db 0
+new_row_lo:
+    db 0
+new_row_page:
     db 0
 range_min:
     db 0
 range_max:
     db 0
+range_base_high:
+    db 0
+range_end_high:
+    db 0
 cell_row:
     db 0
 cell_col:
     db 0
-cell_sample:
+cell_sample_lo:
+    db 0
+cell_sample_page:
     db 0
 cell_addr:
     dw 0
+frame_counter:
+    db 0
+ship_col:
+    db 15
+ship_dir:
+    db 1
+heli_col:
+    db 21
+heli_dir:
+    db 255
+plane_crashed:
+    db 0
+sprite_row:
+    db 0
+sprite_col:
+    db 0
+sprite_pattern:
+    dw 0
+sprite_attr:
+    db 0
 
 align 256
 prefix_mask:
@@ -558,8 +1076,8 @@ suffix_mask:
 
 align 256
 left_bank:
-    ds 256,0
+    ds 1024,0
 
 align 256
 right_bank:
-    ds 256,0
+    ds 1024,0

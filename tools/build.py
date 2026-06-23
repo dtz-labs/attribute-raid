@@ -118,9 +118,10 @@ def mem_expr(op: str) -> str | None:
 
 
 class Assembler:
-    def __init__(self, source: Path) -> None:
+    def __init__(self, source: Path, defines: dict[str, int] | None = None) -> None:
         self.source = source
         self.lines = source.read_text(encoding="utf-8").splitlines()
+        self.defines = defines or {}
         self.labels: dict[str, int] = {}
         self.origin: int | None = None
         self.pc = 0
@@ -222,7 +223,8 @@ class Assembler:
 
     def expr(self, text: str) -> int:
         text = text.strip()
-        env = dict(self.labels)
+        env = dict(self.defines)
+        env.update(self.labels)
         env["HIGH"] = lambda x: (int(x) >> 8) & 0xFF
         env["LOW"] = lambda x: int(x) & 0xFF
         env["$"] = self.pc
@@ -470,12 +472,30 @@ def write_tap(path: Path, code: bytes, start: int) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-D",
+        "--define",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="define an integer symbol for assembly expressions",
+    )
     parser.add_argument("source", type=Path)
     parser.add_argument("outdir", type=Path)
     args = parser.parse_args()
 
+    defines = {"TIMEX_DOUBLE_BUFFER": 0}
+    for item in args.define:
+        if "=" in item:
+            name, value = item.split("=", 1)
+        else:
+            name, value = item, "1"
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+            parser.error(f"bad define name: {name!r}")
+        defines[name] = int(value, 0)
+
     args.outdir.mkdir(parents=True, exist_ok=True)
-    assembler = Assembler(args.source)
+    assembler = Assembler(args.source, defines)
     try:
         origin, code, labels = assembler.assemble()
     except AsmError as exc:

@@ -1,8 +1,8 @@
 # Attribute Raid
 
 Minimal ZX Spectrum 48K proof of concept for a River Raid style river
-renderer.  It is only a renderer experiment: there is no plane, shooting,
-score, fuel, enemies, bridges, music, menu, or collision code.
+renderer.  It is still a renderer experiment: there is no shooting, score,
+fuel, bridges, music, menu, or complete collision system.
 
 ## Build
 
@@ -22,6 +22,13 @@ To launch the TAP in the local ZEsarUX app:
 
 ```sh
 make run
+```
+
+To build and run the Timex Computer 2048 variant with Timex dual-screen page
+flipping:
+
+```sh
+make run-timex
 ```
 
 The local machine did not have `sjasmplus`, `z88dk-z80asm`, `z80asm`,
@@ -58,21 +65,38 @@ for the 50 Hz budget.
 ## River Representation
 
 The river geometry has 2-pixel vertical resolution.  One sample describes two
-scanlines.  Two 256-byte precomputed buffers store the banks:
+scanlines.  Two 1024-byte precomputed buffers store the banks:
 
 - `left_bank[i]`: first water pixel after the left land
 - `right_bank[i]`: first right-land pixel
 
-Only 96 samples are visible on the 192-pixel screen, but 256 entries make
-wrapping free through 8-bit overflow.  Bank motion is pseudo-random and
-deterministic: an 8-bit LFSR builds short 1-2 sample movement segments during
-initialization, so the visible edges are jagged without random work during
-normal animation.
+Only 96 samples are visible on the 192-pixel screen, but 1024 entries make the
+repeat much less obvious.  Bank motion is pseudo-random and deterministic: an
+8-bit LFSR builds short 1-2 sample movement segments during initialization, so
+the visible edges are jagged without random work during normal animation.
 
 Scrolling does not move the bitmap.  Each frame changes the logical start
 index of the ring buffer by one sample for 2 px mode, or by two samples for
 4 px mode.  Normal frames do not generate river samples; the precomputed
 course loops.
+
+## Sprites
+
+A prototype sprite layer draws one-cell 8 x 8 objects after the river
+background:
+
+- a white player plane near the bottom of the river
+- a ship and helicopter over the water, moving horizontally
+- simple tree and tank glyphs on the land near both banks
+
+Sprite cells are redrawn over the reconstructed river background each frame.
+The plane switches to a crash glyph if the current river banks get too close
+to its fixed bottom-screen position.  This is intentionally a coarse renderer
+test, not a final gameplay or collision system.
+
+The Timex build uses Timex video mode 1: screen 0 at `0x4000` and screen 1 at
+`0x6000`.  Each screen remembers which river index it contains, so the dirty
+renderer can update the hidden page before flipping it with port `0xff`.
 
 ## Dirty Rendering
 
@@ -84,10 +108,10 @@ covered by that row.  It computes the byte-column range crossed by the old
 left bank, the new left bank, the old right bank, and the new right bank.  It
 then redraws only the union of the old and new range for each bank.
 
-There is no separate old-pixel map.  The two ring buffers are the geometry
-map, and `old_start_idx` tells the renderer which geometry was visible on the
-previous frame.  Clearing is done by reconstructing complete cells from the
-new geometry across the old-and-new dirty range.
+There is no separate old-pixel map.  The two river buffers are the geometry
+map, and the renderer tracks the previous 10-bit start index for the screen it
+is updating.  Clearing is done by reconstructing complete cells from the new
+geometry across the old-and-new dirty range.
 
 Because each bank still moves by at most one pixel per sample, the usual dirty
 width is one or two cells per bank per tile row, sometimes three cells around
