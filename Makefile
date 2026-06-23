@@ -3,6 +3,7 @@
 OUTDIR := build
 TAP := $(OUTDIR)/attribute-raid.tap
 ZESARUX ?= /Applications/ZEsarUX.app/Contents/MacOS/zesarux
+ZESARUX_FLAGS ?=
 ZESARUX_DIR := $(dir $(ZESARUX))
 
 all: $(TAP)
@@ -16,7 +17,7 @@ $(OUTDIR):
 run: $(TAP)
 	@test -x "$(ZESARUX)" || { echo "ZEsarUX binary not found: $(ZESARUX)" >&2; exit 1; }
 	cd "$(ZESARUX_DIR)" && ./zesarux --noconfigfile --machine 48k \
-		--nosplash --verbose 0 "$(abspath $(TAP))"
+		$(ZESARUX_FLAGS) --nosplash --verbose 0 "$(abspath $(TAP))"
 
 clean:
 	rm -rf $(OUTDIR)
