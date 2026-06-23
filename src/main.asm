@@ -1846,9 +1846,11 @@ draw_opaque_shifted_nonzero:
     ld hl,(cell_addr)
     ld a,(sprite_phase)
     ld b,a
-draw_opaque_shifted_top_addr_loop:
+draw_opaque_shifted_top_clear_loop:
+    xor a
+    ld (hl),a
     inc h
-    djnz draw_opaque_shifted_top_addr_loop
+    djnz draw_opaque_shifted_top_clear_loop
 
     ld de,(sprite_pattern)
     ld a,(sprite_phase)
@@ -1887,6 +1889,17 @@ draw_opaque_shifted_bottom_loop:
     inc de
     inc h
     djnz draw_opaque_shifted_bottom_loop
+
+    ld a,(sprite_phase)
+    ld b,a
+    ld a,8
+    sub b
+    ld b,a
+draw_opaque_shifted_bottom_clear_loop:
+    xor a
+    ld (hl),a
+    inc h
+    djnz draw_opaque_shifted_bottom_clear_loop
     call set_sprite_attr
 
     ld a,(sprite_row)
@@ -1926,9 +1939,7 @@ draw_opaque_wide_shifted_nonzero:
     ld hl,(cell_addr)
     ld a,(sprite_phase)
     ld b,a
-draw_opaque_wide_shifted_top_addr_loop:
-    inc h
-    djnz draw_opaque_wide_shifted_top_addr_loop
+    call clear_wide_rows
 
     ld de,(sprite_pattern)
     ld a,(sprite_phase)
@@ -1969,11 +1980,29 @@ draw_opaque_wide_shifted_bottom_loop:
     inc de
     inc h
     djnz draw_opaque_wide_shifted_bottom_loop
+
+    ld a,(sprite_phase)
+    ld b,a
+    ld a,8
+    sub b
+    ld b,a
+    call clear_wide_rows
     call set_wide_sprite_attr
 
     ld a,(sprite_row)
     dec a
     ld (sprite_row),a
+    ret
+
+clear_wide_rows:
+    xor a
+clear_wide_rows_loop:
+    ld (hl),a
+    inc l
+    ld (hl),a
+    dec l
+    inc h
+    djnz clear_wide_rows_loop
     ret
 
 draw_ship_wide_sprite:
@@ -2005,9 +2034,14 @@ draw_ship_wide_shifted_nonzero:
     ld hl,(cell_addr)
     ld a,(sprite_phase)
     ld b,a
-draw_ship_wide_top_addr_loop:
-    inc h
-    djnz draw_ship_wide_top_addr_loop
+    ld a,(sprite_x_phase)
+    or a
+    jr nz,draw_ship_wide_top_clear4
+    call clear_ship_rows3
+    jr draw_ship_wide_top_clear_done
+draw_ship_wide_top_clear4:
+    call clear_ship_rows4
+draw_ship_wide_top_clear_done:
 
     ld de,(sprite_pattern)
     ld a,(sprite_phase)
@@ -2042,6 +2076,19 @@ draw_ship_wide_top_done:
 draw_ship_wide_bottom4:
     call draw_ship_rows4
 draw_ship_wide_bottom_done:
+    ld a,(sprite_phase)
+    ld b,a
+    ld a,8
+    sub b
+    ld b,a
+    ld a,(sprite_x_phase)
+    or a
+    jr nz,draw_ship_wide_bottom_clear4
+    call clear_ship_rows3
+    jr draw_ship_wide_bottom_clear_done
+draw_ship_wide_bottom_clear4:
+    call clear_ship_rows4
+draw_ship_wide_bottom_clear_done:
     call set_ship_sprite_attr
 
     ld a,(sprite_row)
@@ -2093,6 +2140,37 @@ draw_ship_rows4:
     dec l
     inc h
     djnz draw_ship_rows4
+    ret
+
+clear_ship_rows3:
+    xor a
+clear_ship_rows3_loop:
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    dec l
+    dec l
+    inc h
+    djnz clear_ship_rows3_loop
+    ret
+
+clear_ship_rows4:
+    xor a
+clear_ship_rows4_loop:
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    dec l
+    dec l
+    dec l
+    inc h
+    djnz clear_ship_rows4_loop
     ret
 
 calc_sprite_cell_addr:
