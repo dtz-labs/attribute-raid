@@ -1,173 +1,318 @@
 # Attribute Raid — renderer V3
 
-Prototyp gry w stylu River Raid dla ZX Spectrum 48K. Kod wykonywany na
-Spectrum jest napisany w dobrze komentowanym assemblerze Z80. Nie ma kodu C.
+Attribute Raid is a River Raid-style prototype with a ZX Spectrum 48K-compatible
+renderer and optional AY-3-8912 sound for the Spectrum 128K or a 48K machine
+with an AY interface. All code executed on the Spectrum is well-commented Z80
+assembly; there is no C runtime.
 
-V3 świadomie zbliża geometrię do wersji Atari 2600: brzegi są zbudowane z
-dużych, schodkowych fragmentów, ale przewijają się płynnie co jeden piksel.
-Bitmapa ekranu nigdy nie jest kopiowana ani przewijana. Renderer zmienia tylko
-linie, które właśnie przekroczyły granicę bloku świata. Sprite'y są usuwane i
-rysowane przez XOR, a szeroki most jest utrzymywany przyrostowo.
+V3 deliberately follows the coarse geometry of the Atari 2600 game. The banks
+are built from large stepped segments but still scroll smoothly by one pixel.
+The renderer never copies or scrolls the complete screen bitmap. It updates
+only the scanlines that have just crossed a world-block boundary. Moving
+sprites are erased and redrawn with XOR, while the wide bridge is maintained
+incrementally.
 
-To nadal prototyp, nie kompletna gra, ale ma już podstawową pętlę rozgrywki:
-sterowanie samolotem, dwa biegi, pocisk, zderzenia, dwa życia, animację
-eksplozji oraz ekran `GAME OVER`. Nie ma jeszcze paliwa, punktów, dźwięku ani
-logiki pełnych poziomów.
+This is still a prototype rather than a complete game, but it has the basic
+gameplay loop: aircraft controls, two speed modifiers, firing, collisions, two
+lives, fuel and refuelling, a crash animation, scoring, AY sound, and a `GAME
+OVER` screen. Complete level progression is not implemented yet.
 
-## Budowanie i uruchamianie
+## Building and running
 
 ```sh
 make
 make run
+make run-48       # graphics/gameplay only on a stock 48K machine
 ```
 
-Wynik powstaje jako `build/attribute-raid.tap`. Pozostałe cele:
+The build produces `build/attribute-raid.tap`. Other targets are:
 
 ```sh
-make profile      # border pokazuje czas pełnej aktualizacji gry
+make profile      # the border shows the duration of a complete game update
 make run-profile
 make clean
 ```
 
-Program startuje od `32768` (`0x8000`). `tools/build.py` jest małym assemblerem
-używanego podzbioru Z80 oraz generatorem loadera BASIC i pliku TAP, więc
-repozytorium nie wymaga zewnętrznego toolchainu Z80.
+`make run` selects a Spectrum 128K in ZEsarUX so the AY soundtrack is audible.
+The program remains safe on a stock 48K machine, but its AY port writes have no
+chip to answer them and are therefore silent.
 
-## Sterowanie
+The program starts at address `32768` (`0x8000`). `tools/build.py` implements
+the small subset of Z80 instructions used by the game and generates both the
+BASIC loader and TAP file, so no external Z80 toolchain is required.
 
-- `O` / `P` — samolot gracza w lewo / w prawo (2 px/klatkę),
-- bez klawisza prędkości — bieg bazowy (1 px/klatkę),
-- przytrzymane `Q` — chwilowo szybciej (2 px/klatkę),
-- przytrzymane `A` — chwilowo wolniej (średnio 0,5 px/klatkę),
-- `SPACE` — strzał,
-- `R` — rozpoczęcie nowej gry z dwoma życiami i nową trasą.
+## Controls
 
-Kempston joystick obsługuje lewo/prawo, FIRE oraz chwilową zmianę prędkości:
-wychylenie w górę odpowiada `Q`, a w dół odpowiada `A`. Cel `make run`
-uruchamia ZEsarUX z emulacją Kempstona. Po utracie drugiego życia `SPACE` lub
-FIRE rozpoczyna nową grę; najpierw trzeba puścić przycisk, aby przypadkowo nie
-pominąć ekranu `GAME OVER`.
+- `O` / `P` — move the player aircraft left / right at 2 px per frame,
+- no speed key — base scrolling speed of 1 px per frame,
+- hold `Q` — temporarily increase scrolling to 2 px per frame,
+- hold `A` — temporarily reduce scrolling to an average of 0.5 px per frame,
+- `SPACE` — fire,
+- `R` — start a new game with two lives, a zero score, and a new course.
 
-## Model V3
+The Kempston joystick supports left/right, FIRE, and temporary speed changes.
+Up is equivalent to `Q`, and down is equivalent to `A`. `make run` starts
+ZEsarUX with Kempston emulation enabled. After the second life is lost, release
+FIRE before pressing it again to start a new game; this prevents the `GAME
+OVER` screen from being skipped accidentally.
 
-Jeden blok trasy ma osiem linii świata. Położenie obu brzegów jest wyrażone w
-jednostkach czterech pikseli, co daje charakterystyczne duże schodki. Generator
-utrzymuje ten sam ruch brzegu przez 5–12 bloków, czyli 40–96 linii. Długie
-proste i stałe skosy są dzięki temu częstsze niż drobny losowy zygzak. Taki
-odcinek można później skompresować do pary `długość + krok`.
+## V3 course model
 
-32 bloki tworzą pierścień. Sześć wyrównanych do stron tablic przechowuje:
+One course block represents eight world scanlines. Both bank positions use
+four-pixel units, producing the large characteristic steps. The generator
+keeps the same bank movement for 5–12 blocks, or 40–96 scanlines. Long straight
+and constant-slope sections are therefore more common than small random
+zigzags. Such a section could later be compressed into a `length + step` pair.
 
-- kolumnę i maskę lewego brzegu,
-- kolumnę i maskę prawego brzegu,
-- opcjonalny lewy i prawy koniec wyspy.
+Thirty-two blocks form a ring. Six page-aligned arrays store:
 
-Wyspa jest trzecim przedziałem lądu wewnątrz rzeki. Rośnie przez kolejne bloki,
-utrzymuje szerokość i zwęża się, tworząc prawdziwe rozwidlenie bez drugiego
-renderera ani bufora ekranu. Most pozostał osobnym obiektem, dobiera szerokość
-do aktualnego koryta i ma 16 scanline'ów wysokości.
+- the left-bank column and mask,
+- the right-bank column and mask,
+- the optional left and right edges of an island.
 
-Po każdej próbce przewinięcia zmienia się tylko jedna ósma linii ekranu.
-Renderer aktualizuje więc:
+An island is a third land interval inside the river. It grows over consecutive
+blocks, maintains its width, and then narrows, creating a real fork without a
+second renderer or screen buffer. The bridge remains a separate object. It
+matches the current river width and is 16 scanlines high. A white road with a
+two-scanline dashed centre marking extends across the land on both sides.
 
-- 24 linie przy 1 px/klatkę,
-- 48 linii przy 2 px/klatkę.
+The top character row is a static HUD, the bottom character row remains black,
+and the river occupies 176 scanlines (`Y=8..183`). Each scroll sample changes
+only one eighth of the playfield scanlines, so the renderer updates:
 
-Na każdej takiej linii zapisuje trzy bajty lewego brzegu, trzy prawego oraz —
-tylko podczas rozwidlenia — krótki przedział wyspy. Pełne 6144 bajty bitmapy są
-rysowane wyłącznie przy starcie i po `R`.
+- 22 scanlines at 1 px per frame,
+- 44 scanlines at 2 px per frame.
 
-## Kolor, most i sprite'y
+On every affected scanline it writes three bytes around the left bank, three
+around the right bank, and—only during a fork—a short island interval. The full
+6144-byte bitmap is rendered only during startup and after `R`.
 
-Normalne komórki atrybutów mają wartość `0x4c`: BRIGHT 1, zielony INK i
-niebieski PAPER. Bit `1` bitmapy oznacza ląd lub obiekt, a bit `0` wodę. Most
-czasowo przełącza zajmowane komórki na `0x0a`, czyli ciemny czerwono-brązowy
-INK na niebieskim tle. Oryginalny Spectrum nie ma osobnej barwy brązowej;
-ciemna czerwień jest tutaj najbliższym czystym kolorem bez ditheringu.
+## Colour, bridge, and sprites
 
-Most także jest bitmapą, dlatego może zaczynać się na dowolnym Y i przesuwać
-płynnie o jeden piksel. Standardowe atrybuty ZX Spectrum są przywiązane do
-siatki 8×8, więc kolor obejmuje dwie lub trzy całe komórki i zmienia zasięg
-co osiem linii. Bitmapa mostu nadal porusza się co piksel. Renderer aktualizuje
-tylko jeden wchodzący lub wychodzący rząd atrybutów, zamiast przemalowywać
-cały prostokąt. Tryb Timex hi-colour nie jest wymagany.
+Normal attribute cells use `0x4c`: BRIGHT 1, green INK, and blue PAPER. A set
+bitmap bit represents land or a visible object; a clear bit represents water.
+The bridge temporarily changes its cells to `0x0a`, producing dark red/brown
+INK over blue PAPER. The original Spectrum has no dedicated brown colour, so
+dark red is the closest solid colour without dithering.
 
-Sylwetki gracza, statku, poprzecznego samolotu i helikoptera zostały
-zrekonstruowane z przeplatanych danych obiektów oryginalnego River Raid na
-Atari 2600 i rozszerzone poziomo 2×. Źródłem porównawczym był publiczny
-[dekompilat River Raid](https://gitlab.com/menelkir/atari-2600/-/blob/master/River%20Raid%20%28decomp%29.asm).
-Czołg jest nową sylwetką narysowaną według tych samych ograniczeń 8-bitowego
-wzoru rozszerzanego 2×.
+The bridge is also a bitmap object, so it may begin at any Y position and move
+smoothly by one pixel. Standard Spectrum attributes are tied to an 8×8 grid;
+the bridge colour therefore covers two or three complete cells and advances in
+eight-scanline steps even though the bitmap moves every pixel. The renderer
+updates only an entering or departing attribute row instead of repainting the
+whole rectangle. Timex hi-colour mode is not required.
 
-Kolejność wierszy helikoptera i poprzecznego samolotu została dodatkowo
-sprawdzona na zrzutach Atari 2600; wcześniejsza tabela zamieniała parami
-wiersze pochodzące z przeplatanego obrazu. Helikopter używa białego INK na
-niebieskim PAPER. Atari mogło zmieniać kolor obiektu co scanline, natomiast
-Spectrum ma jeden zestaw kolorów na komórkę 8×8, dlatego dokładne czarno-białe
-pasy wymagałyby widocznego prostokąta attribute clash.
+Road cells on the banks use white INK over black PAPER, while the part above
+the river retains the red/brown bridge colour. Two central scanlines contain
+alternating eight-pixel gaps. Only the 1–2 centre lines entering or leaving the
+road are changed during scrolling. The effect does not use the physical screen
+border: the experimental border raster reduced animation to roughly 25 Hz and
+has been removed.
 
-Aktualna scena zawiera:
+The player, ship, crossing aircraft, and helicopter silhouettes were
+reconstructed from the interlaced object data of the Atari 2600 River Raid and
+expanded horizontally by 2×. The public
+[River Raid disassembly](https://gitlab.com/menelkir/atari-2600/-/blob/master/River%20Raid%20%28decomp%29.asm)
+was used as a reference. The tank is a new silhouette drawn under the same
+eight-bit-source and 2× horizontal expansion constraints.
 
-- samolot gracza sterowany klawiszami `O` / `P`,
-- dwa statki: jeden pozostaje nieruchomy w osi X, drugi patroluje z prędkością
-  jednego rzeczywistego piksela co dwie klatki,
-- samolot przelatujący przez całe 256 pikseli z prędkością 3 px/klatkę; jego Y
-  przesuwa się razem z trasą, więc pozostaje na tej samej linii świata,
-- helikopter, którego kolejne pojawienia naprzemiennie stoją lub patrolują po
-  jednym pikselu na klatkę,
-- okresowy czołg na lewym albo prawym brzegu,
-- okresowy most i rozwidlenie.
+The helicopter now uses the actual `Heli0A/B` and `Heli1A/B` data from the
+Atari disassembly. Interleaving the A/B kernel rows produces the ten visible
+scanlines; the two animation frames differ only in their first two rotor rows
+and toggle every second display frame, matching the original logic. Atari used
+the `REFP1` hardware bit to reflect the complete sprite when its patrol changed
+direction. This version precomputes both animation frames in both directions,
+so the helicopter's nose always points along its movement. It uses white INK
+over blue PAPER. The Atari could change an object's colour on each scanline,
+whereas the Spectrum has one colour pair per 8×8 cell; exact black-and-white
+bands would create a visible attribute-clash rectangle.
 
-Domki i drzewa są celowo wyłączone w tej wersji.
+The current scene contains:
 
-Ruchome sprite'y są nakładane przez XOR. Blitter obsługuje dowolne przesunięcie
-bitowe, więc ruch 1–3 px nie jest serią skoków o pełne osiem pikseli. Osiem
-wariantów przesunięcia każdego kształtu powstaje raz przy starcie w pamięci
-RAM; czas rysowania nie zależy już od `X & 7`. Statek i helikopter pobierają
-granice aktualnej odnogi; podczas rozwidlenia wyspa działa dla nich jak drugi
-brzeg i wymusza zawrócenie. Na czas kilku linii sprite'a rejestr `SP` wskazuje
-tabelę adresów scanline'ów; kolejne `POP HL` omijają koszt wyliczania
-przeplatanej adresacji bitmapy Spectrum.
+- the player aircraft controlled with `O` / `P`,
+- two 32-pixel-wide ships: one remains fixed on the X axis, while the other
+  patrols by one real pixel every two frames and uses a horizontally reflected
+  cache whenever it travels left, so its bow always faces its movement,
+- an aircraft crossing all 256 screen pixels at 3 px per frame; its Y position
+  scrolls with the course, so it remains on the world line where it appeared;
+  once shot down it stays absent until the scene is restarted,
+- a helicopter whose consecutive appearances alternate between stationary and
+  one-pixel-per-frame patrol modes,
+- a destructible vertical 8×32 `F`/`U`/`E`/`L` depot with a white `F`, magenta
+  `U`, white `E`, and magenta `L` background, which safely refuels the player
+  on contact,
+- a periodic tank on the left or right bank, firing horizontally over water,
+- a bridge and full-width road with a tank that either drives from one screen
+  edge, across the approach and bridge, to the opposite edge, or stops before
+  the entrance and fires into the river,
+- periodic river forks.
 
-Most nie jest kasowany w całości. Co klatkę odtwarzane są tylko 1–2 linie
-opuszczających jego górę, dopisywane są nowe linie na dole, a cztery bajty przy
-brzegach są odświeżane po rendererze rzeki. Dzięki temu 16-pikselowa grubość
-nie wymaga dwóch pełnych przebiegów po całym prostokącie.
+Houses and trees are deliberately disabled in this version.
 
-Kolizja brzegu nie korzysta już z prostokątnych granic odnogi. Wszystkie
-nieprzezroczyste piksele maski samolotu 16×13 są porównywane z faktyczną
-bitmapą: ustawiony bit oznacza brzeg, wyspę albo nienaruszony most. Dzięki temu
-przezroczyste narożniki sprite'a nie zabijają przed zetknięciem z lądem, a obie
-strony wyspy działają identycznie. Osobny, łagodniejszy rdzeń 6×6 wykrywa
-zderzenia ze statkami, helikopterem, poprzecznym samolotem i czołgiem.
+At most two of the four water-combat actors (the two ships, helicopter, and
+crossing aircraft) are active simultaneously. A ship or helicopter that leaves
+the screen or is destroyed waits 160 frames before requesting a free slot;
+when both slots are occupied, it keeps waiting instead of being generated and
+silently overloading the renderer. This halves the main enemy-sprite density
+without frame skipping. Fuel, tanks, projectiles, and short explosion effects
+are not counted because they have separate gameplay roles and appear only
+periodically.
 
-Gracz zaczyna z dwoma życiami, pokazanymi jako małe ikony w lewym górnym
-rogu. Po kolizji samolot zastępuje trzyklatkowa eksplozja, a rzeka i pozostałe
-obiekty zatrzymują się na 75 klatek, czyli około 1,5 sekundy przy 50 Hz. Po
-pierwszym zgonie trasa startuje od nowa z jednym życiem; po drugim pojawia się
-osobny ekran `GAME OVER`.
+Moving sprites are applied with XOR. The blitter supports arbitrary bit
+offsets, so 1–3 px movement is not implemented as a series of eight-pixel
+jumps. Eight shifted variants of each shape are generated once in RAM during
+startup, making drawing time independent of `X & 7`. Ships and helicopters use
+the bounds of their current branch; during a fork, the island acts as a second
+bank and forces them to turn around. While drawing a few sprite rows, `SP`
+temporarily points at the scanline-address table, and consecutive `POP HL`
+instructions avoid recalculating the Spectrum's interlaced bitmap addresses.
+Respawning water objects select distinct vertical lanes at least twelve pixels
+apart. Bridge-driven relocation uses the same check, preventing two ships or a
+ship and helicopter from being XORed into a composite silhouette. FUEL uses
+its complete 32-pixel height in both directions of this test: it avoids active
+ships and aircraft when it appears, and later respawns avoid the whole depot.
 
-Pocisk leci w górę i może zniszczyć most. Statki oraz helikopter są odsuwane
-poza pionowy pas mostu i nie mogą przez niego przepłynąć; czołg celowo nie
-podlega tej regule i może znajdować się na brzegu na tej samej wysokości co
-most.
+The bridge is not erased in full while scrolling. Each frame restores only the
+1–2 scanlines leaving its top, adds new scanlines at the bottom, and refreshes
+four edge bytes after the river renderer. Its 16-pixel thickness therefore
+does not require two complete passes over the rectangle.
 
-## Zweryfikowany budżet
+## Collision and gameplay details
 
-Pomiary wykonane protokołem debuggera ZEsarUX dla Spectrum 48K, na szybkim
-biegu 2 px/klatkę:
+Bank collision no longer relies on rectangular branch bounds. Every opaque
+pixel of the 16×13 player mask is compared with the actual bitmap. A set bit
+means bank, island, or intact bridge. Transparent sprite corners cannot cause
+an early crash, and both sides of an island behave identically.
 
-- 65 223 takty w ciężkiej klatce z aktywnym mostem i wszystkimi
-  sprite'ami,
-- 61 582 takty przy wymuszonym, zmieniającym kształt rozwidleniu długości
-  dziesięciu bloków i wszystkich sprite'ach.
+A separate forgiving 6×6 player core checks collisions with the 32-pixel
+ships, helicopter, crossing aircraft, the bridge tank, and the shared 2×2 tank
+shell. The ordinary shore tank is not a direct collision target: it remains on
+lethal land, while only its projectile enters navigable water. The shell moves
+horizontally at 4 px per frame while retaining its world line as the river
+scrolls. When fired, it aims toward the player's current centre but clamps its
+destination to a safe water branch. At the destination it becomes a two-frame
+animation of a ball and expanding splash. The flying shell is lethal; the
+splash itself is harmless. The shore tank waits 72 frames before its first shot
+and 96 frames between later shots, making its fire less frequent but more
+dangerous once a shell is in flight.
 
-Budżet klatki 50 Hz wynosi 69 888 taktów. Powyższe przypadki zajmują
-odpowiednio około 93,3% i 88,1% klatki. Generator planuje most i rozwidlenie
-jako osobne cechy trasy, więc ich najdroższe przebiegi nie nakładają się w
-normalnej sekwencji. Pozostaje około 4,7 tys. taktów w ciężkiej klatce mostu;
-przed dodaniem dźwięku i paliwa warto ponowić profilowanie.
+The 32-column HUD displays `LIVES:n FUEL:###### SCORE:nnnnnn`. The six fuel
+cells represent eight units each. One unit is consumed every 32 frames; while
+the player overlaps `FUEL`, consumption pauses and one unit is restored every
+five frames. Reaching zero causes a crash. Labels are copied only when the
+screen is created. Later updates touch only the changed life digit, fuel cells,
+or the shortest score suffix affected by decimal carry.
 
-Test po usunięciu poruszonych sprite'ów porównał wszystkie 6144 bajty bitmapy
-z pełną rekonstrukcją z pierścienia trasy: liczba różniących się bajtów wyniosła
-`0`.
+`FUEL` is deliberately non-lethal: the player may overlap it to refuel. A
+projectile destroys it, awards 100 points, and starts the normal impact
+explosion; another depot enters later. Its four letters occupy separate 8×8
+cells in one vertical column. As in the Atari `FuelA/FuelB` shape, the bitmap
+contains the solid depot body and cuts the letters out of it. Four stable colour
+bands make the `F` and `E` backgrounds bright white and the `U` and `L`
+backgrounds bright magenta; there is no temporal flashing. Standard Spectrum
+colour is tied to the 8-line attribute grid, so while the bitmap moves every
+pixel, a split colour boundary selects the letter occupying most of that cell.
+A dedicated one-byte blitter draws 32 narrow rows with fewer bitmap writes than
+the former 32×8 horizontal word.
+
+Destroying either ship, the helicopter, or the crossing aircraft awards 100
+points, consumes the projectile, and starts a short three-frame impact
+explosion with an AY burst. Ships and the helicopter return after their
+160-frame delay and only when a combat-sprite slot is free; the crossing
+aircraft remains destroyed for the rest of the current scene. Projectile
+collision tests the complete ten-scanline swept interval, so a six-pixel
+movement cannot tunnel through an eight-line hull. The crossing aircraft is
+tested explicitly because it may fly above land and its XOR image has already
+been erased during collision processing.
+
+After moving-target tests, the projectile's two solid pixels are checked over
+all ten scanlines of the swept path. They must remain over clear bitmap bits,
+which normally represent blue water. Contact with a bank, island, or road
+consumes the projectile. Contact with the bridge geometry destroys the bridge
+and awards points.
+
+The player starts with two lives. After a collision, a three-frame explosion
+replaces the aircraft while the river and all other objects remain frozen for
+75 frames, or approximately 1.5 seconds at 50 Hz. After the first crash the
+course restarts with one life and the score preserved. The second crash opens a
+separate `GAME OVER` screen.
+
+The player projectile can destroy a bridge, now with both a visible impact and
+an AY explosion. A bridge alone is worth 200 points. If a crossing tank is
+already on the span, the same shot also removes the tank and awards 500 points
+in total. A tank waiting and firing on a white road approach survives bridge
+destruction. A crossing tank which has not reached the span also survives,
+stops on the remaining road, and switches to the firing behaviour. Ships,
+helicopters, and fuel are kept at
+least eight pixels outside the bridge's vertical band and cannot pass through
+it. The bridge tank is intentionally exempt. The shore and bridge tanks have
+separate actor state and can appear simultaneously; only their projectile slot
+is shared. Bridge behaviours alternate, with the first bridge guaranteed to
+use the crossing behaviour and the next tank stopping to fire. A crossing tank
+starts at pixel X=0 or X=240 and remains active until its hull reaches the
+opposite screen edge; leaving the bridge span no longer removes it. At base
+speed it alternates one- and two-pixel steps, averaging 1.5 px per frame instead
+of the former 2 px. This sideways speed is independent of the player's Q/A
+scroll modifier.
+
+Destroying a bridge clears all 16 affected bitmap scanlines before rebuilding
+the complete banks, island, and river. The brown centre span becomes blue
+water, while the white road approaches and their dashed markings remain on
+both banks and keep scrolling down with the world. A dedicated full-row repair
+path is used when each dashed line leaves the road; the normal dirty renderer
+updates only bank edges and therefore cannot reconstruct a row which has been
+cleared completely.
+
+## AY sound
+
+The original Atari sound routine uses a white-noise jet channel whose frequency
+depends on vertical speed and a separate short missile tone. The AY adaptation
+keeps the same division of labour:
+
+- channel A is noise-only engine sound,
+- slow, base, and fast movement select progressively higher noise frequencies
+  and volumes,
+- channel B is a tone-only missile sweep,
+- each shot starts a sixteen-frame software envelope: tone period increases
+  from a deliberately lower initial pitch while volume falls from 8 to 0,
+  producing a descending `bziu-uum`,
+- tank fire restarts channel B with a sharper, louder sweep,
+- channel C adds falling tone/noise bursts for impacts, the player's crash and
+  the tank shell's water splash,
+- refuelling temporarily turns channel C into a clean four-frame bell whose
+  pitch remains constant while fuel is being added; reaching a full tank and
+  remaining over the depot produces repeating pings exactly one octave higher.
+
+Engine registers are rewritten only when the requested speed changes. A stock
+48K Spectrum continues to run the same game code silently; use `make run` for a
+128K ZEsarUX configuration or `make run-48` to test that fallback explicitly.
+
+## Performance budget
+
+The latest ZEsarUX debugger measurements made before the white road and centre
+markings were added, at the 2 px-per-frame speed, were:
+
+- 57,807 T-states for an ordinary full update,
+- 64,796 T-states with an active 22-byte-wide bridge,
+- 69,089 T-states in an artificially forced maximum with the bridge and both
+  projectiles active.
+
+A 50 Hz frame contains 69,888 T-states. The road does not redraw the complete
+bridge. At 1 px per frame it restores one centre line and adds one; at 2 px it
+does the same for two lines. Restoration writes only the 16 bytes that actually
+contained black dashes. The left road, bridge span, and right road attributes
+are written in one 32-byte pass rather than painting the full row white and
+then overwriting the wide centre.
+
+The precise current worst case still needs to be remeasured in the debugger,
+so the values above must not be treated as timings for the current build. A
+special five-byte blitter draws each wide ship in one pass; composing it from
+two ordinary sprites would require setting up the scanline table and `SP`
+twice. The new two-actor water-combat cap also prevents the old four-enemy
+maximum from occurring in normal play. The generator schedules bridges and
+forks as separate course features, so their most expensive paths do not
+overlap in normal generation.
+
+A consistency test removed all moving sprites and compared all 6144 bitmap
+bytes with a full reconstruction from the course ring. The number of differing
+bytes was `0`.

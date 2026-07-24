@@ -367,6 +367,8 @@ class Assembler:
 
         if op == "out":
             port, src = args[0], args[1].lower()
+            if src == "a" and port.lower() == "(c)":
+                return b"\xed\x79"
             if src == "a" and port.startswith("(") and port.endswith(")"):
                 return bytes([0xD3, self.u8(self.expr(port[1:-1]))])
 

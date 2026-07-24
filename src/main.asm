@@ -4,12 +4,21 @@
 ; block is eight world scanlines high and both banks move in four-pixel steps.
 ; Scrolling is still pixel-smooth.  Instead of repainting all 192 scanlines,
 ; each frame updates only the rows which cross a block boundary (alternating
-; between zero and 24 rows with the slow modifier, 24 at base speed, and 48
+; between zero and 22 rows with the slow modifier, 22 at base speed, and 44
 ; at fast speed).  A fork is an optional land interval inside the river and
 ; is handled by the same dirty-row pass.
 ;
 ; Bitmap convention: 1 = green land/object, 0 = blue water/object cut-out.
 ; Normal attributes stay fixed; only the bridge's brown cells are updated.
+;
+; Vertical screen contract:
+;   Y=0..7     immutable white-on-black HUD (LIVES, FUEL and SCORE)
+;   Y=8..183   scrolling playfield and all live actors
+;   Y=184..191 black lower margin, hidden from the renderer and bridge
+; The separation is what lets the HUD update only when its contents change.
+;
+; Coordinate convention: moving XOR objects, including the tank, use pixel X.
+; Bank and bridge geometry remains byte-based because it is always aligned.
 ;
 ; Entry point: 32768 (0x8000).
 
@@ -23,27 +32,37 @@ start:
     call full_redraw
     call init_shifted_sprites
     call init_entities
+    call init_ay_sound
     ld a,2
     ld (lives),a
+    call reset_score
     xor a
     ld (game_state),a
-    call paint_life_attributes
+    ld a,7                         ; first HUD paint needs lives, score and fuel
+    ld (hud_dirty),a
+    call update_hud_if_dirty
     call paint_helicopter_attributes
+    call paint_fuel_attributes
     call draw_entities
     ei
 
 main_loop:
+    ; HALT is the only frame synchronisation point. On a 48K Spectrum the ROM
+    ; interrupt wakes us once per 50 Hz display frame.
     xor a
     out (0xfe),a
     halt
 
     ld a,(game_state)
+    ; Non-playing states own the whole frame and never fall through into river
+    ; movement. This freezes the scene during an explosion and on GAME OVER.
     cp 1
     jp z,crash_wait_frame
     cp 2
     jp z,game_over_frame
 
     call read_keyboard
+    call update_ay_sound
 
     ld a,(paused)
     or a
@@ -55,6 +74,7 @@ main_loop:
     ; update_bridge later changes only the rows entering/leaving its envelope.
     call restore_entities
     call restore_helicopter_attributes
+    call restore_fuel_attributes
 
     ld a,(speed_pixels)
     or a
@@ -68,19 +88,24 @@ advance_frame_samples:
 
     call render_dirty_rows
 course_not_scrolled:
+    ; Entity coordinates are updated only after their old XOR images have been
+    ; removed. Collision therefore sees a clean river/bridge bitmap.
     call update_entities
+    call update_hud_if_dirty
     ld a,(crashed)
     or a
     jr z,draw_updated_entities
     call begin_crash
-    call paint_life_attributes
+    call update_hud_if_dirty
     call paint_helicopter_attributes
+    call paint_fuel_attributes
     call paint_crash_attributes
     call draw_entities
     call profile_end
     jr main_loop
 draw_updated_entities:
     call paint_helicopter_attributes
+    call paint_fuel_attributes
     call draw_entities
     call profile_end
     jr main_loop
@@ -91,11 +116,23 @@ draw_updated_entities:
 ; ---------------------------------------------------------------------------
 
 init_attributes:
-    ; BRIGHT 1, PAPER blue, INK green.
+    ; BRIGHT 1, PAPER blue, INK green in the 22-row playfield. Character row
+    ; zero is a white-on-black HUD and row 23 is a blank lower margin.
     ld hl,0x5800
     ld (hl),0x4c
     ld de,0x5801
     ld bc,767
+    ldir
+    ld hl,0x5800
+    ld (hl),0x47
+    ld de,0x5801
+    ld bc,31
+    ldir
+    ld hl,0x5ae0
+    xor a
+    ld (hl),a
+    ld de,0x5ae1
+    ld bc,31
     ldir
     ret
 
@@ -104,50 +141,172 @@ reinitialize_demo:
     call init_course
     call full_redraw
     call init_entities
+    call init_ay_sound
     xor a
     ld (game_state),a
-    call paint_life_attributes
+    ld (hud_initialized),a          ; full_redraw cleared the static labels too
+    ld a,(hud_dirty)
+    or 5                           ; new life restores both lives and fuel meter
+    ld (hud_dirty),a
+    call update_hud_if_dirty
     call paint_helicopter_attributes
+    call paint_fuel_attributes
     call draw_entities
     ret
 
 start_new_game:
     ld a,2
     ld (lives),a
+    ld a,(hud_dirty)
+    or 1
+    ld (hud_dirty),a
+    call reset_score
     jp reinitialize_demo
 
-paint_life_attributes:
-    ; Two small HUD cells live permanently in the solid upper-left bank.
-    ; A remaining life is a black plane cut out of a white 8x8 cell.
-    ld hl,0x5800
-    ld a,(lives)
+reset_score:
+    ld hl,score_digit_0
+    ld (hl),48
+    ld de,score_digit_1
+    ld bc,5
+    ldir
+    ld a,4                         ; only the four high digits can ever change
+    ld (score_redraw_count),a
+    ld a,(hud_dirty)
+    or 2
+    ld (hud_dirty),a
+    ret
+
+update_hud_if_dirty:
+    ; Bit 0 requests life, bit 1 score and bit 2 the six-cell fuel gauge. The
+    ; labels and padding are copied only once; repainting the complete HUD
+    ; was expensive enough to miss a 50 Hz interrupt and looked like a brief
+    ; full-screen redraw even though only the HUD had actually changed.
+    ld a,(hud_dirty)
     or a
-    jr z,no_life_attributes
-    ld (hl),0x47
-    inc hl
+    ret z
+    ld (hud_update_mask),a
+    xor a
+    ld (hud_dirty),a
+    ld a,(lives)
+    add a,48
+    ld (hud_life_digit),a
+
+    ld a,(hud_initialized)
+    or a
+    jr nz,update_existing_hud_digits
+
+    xor a
+    ld (hud_clear_y),a
+clear_hud_row:
+    ld a,(hud_clear_y)
+    call calc_screen_line_addr
+    xor a
+    ld (hl),a
+    ld d,h
+    ld e,l
+    inc de
+    ld bc,31
+    ldir
+    ld a,(hud_clear_y)
+    inc a
+    ld (hud_clear_y),a
+    cp 8
+    jr nz,clear_hud_row
+
+    call update_fuel_meter_text
+    ld hl,hud_text
+    ld b,32
+    ld d,0
+    ld e,0
+    call draw_rom_text
+    ld a,1
+    ld (hud_initialized),a
+    xor a
+    ld (score_redraw_count),a
+    ret
+
+update_existing_hud_digits:
+    ld a,(hud_update_mask)
+    and 1
+    jr z,update_hud_score
+    ld hl,hud_life_digit
+    ld b,1
+    ld d,0
+    ld e,6
+    call draw_rom_text
+update_hud_score:
+    ld a,(hud_update_mask)
+    and 2
+    jr z,update_hud_fuel
+    ; Usually only the hundreds digit changed. Carry propagation enlarges the
+    ; suffix to two, three or four glyphs, but unchanged digits are untouched.
+    ld a,(score_redraw_count)
+    or a
+    jr z,update_hud_fuel
+    ld b,a
+    ld hl,score_digit_4             ; one byte beyond the changing suffix
+    ld e,30                         ; screen column matching score_digit_4
+update_score_start_column:
+    dec hl
+    dec e
     dec a
-    jr z,one_life_attribute
-    ld (hl),0x47
-    ret
-one_life_attribute:
-    ld (hl),0x4c
-    ret
-no_life_attributes:
-    ld (hl),0x4c
+    jr nz,update_score_start_column
+    ld d,0
+    call draw_rom_text
+    xor a
+    ld (score_redraw_count),a
+update_hud_fuel:
+    ld a,(hud_update_mask)
+    and 4
+    ret z
+
+    call update_fuel_meter_text
+    ld hl,fuel_meter_0
+    ld b,6
+    ld d,0
+    ld e,13
+    jp draw_rom_text
+
+update_fuel_meter_text:
+    ; Six ROM glyphs represent eight fuel units each. Only threshold crossings
+    ; mark the HUD dirty, so normal fuel consumption never redraws every frame.
+    ld a,(fuel_level)
+    ld c,a
+    ld hl,fuel_meter_0
+    ld b,6
+build_fuel_meter_cell:
+    ld a,c
+    cp 8
+    jr c,empty_fuel_meter_cell
+    sub 8
+    ld c,a
+    ld a,35                         ; '#': one full eighth of the tank
+    jr store_fuel_meter_cell
+empty_fuel_meter_cell:
+    ld c,0
+    ld a,46                         ; '.': depleted eighth
+store_fuel_meter_cell:
+    ld (hl),a
     inc hl
-    ld (hl),0x4c
+    djnz build_fuel_meter_cell
     ret
 
 paint_helicopter_attributes:
     ; The Atari sprite changes colour by scanline. Spectrum attributes cannot
     ; follow a freely moving 10-pixel object that closely, so use a crisp white
     ; INK on the existing blue PAPER without introducing an opaque rectangle.
+    ld a,(helicopter_active)
+    or a
+    ret z
     ld a,0x4f
     jr prepare_helicopter_attributes
 
 restore_helicopter_attributes:
     ; Water objects are kept away from the brown bridge, so the normal river
     ; attribute is always the correct value underneath the old helicopter.
+    ld a,(helicopter_active)
+    or a
+    ret z
     ld a,0x4c
 prepare_helicopter_attributes:
     ld (object_attr_value),a
@@ -186,6 +345,85 @@ helicopter_attr_rows_ready:
     ld (object_attr_rows),a
     jp paint_object_attribute_cells
 
+paint_fuel_attributes:
+    ld a,(fuel_active)
+    or a
+    ret z
+    call prepare_fuel_attribute_geometry
+    xor a
+    ld (fuel_attr_phase),a          ; F starts on white
+    ld a,(fuel_y)
+    and 7
+    cp 4
+    ld a,0
+    jr c,store_fuel_attr_repeat
+    inc a                           ; favour the preceding letter after midpoint
+store_fuel_attr_repeat:
+    ld (fuel_attr_repeat),a
+paint_next_fuel_attribute:
+    ld a,(fuel_attr_phase)
+    or a
+    ld a,0x4f                       ; BRIGHT white body over blue cut-outs
+    jr z,fuel_attribute_value_ready
+    ld a,0x4b                       ; BRIGHT magenta body over blue cut-outs
+fuel_attribute_value_ready:
+    ld (object_attr_value),a
+    ld a,1
+    ld (object_attr_rows),a
+    call paint_object_attribute_cells
+    ld a,(fuel_attr_rows_remaining)
+    dec a
+    ld (fuel_attr_rows_remaining),a
+    ret z
+    ld a,(fuel_attr_repeat)
+    or a
+    jr z,toggle_fuel_attr_phase
+    xor a                           ; repeat F colour across a late boundary
+    ld (fuel_attr_repeat),a
+    jr paint_next_fuel_attribute
+toggle_fuel_attr_phase:
+    ld a,(fuel_attr_phase)
+    xor 1                           ; F/E white, U/L magenta
+    ld (fuel_attr_phase),a
+    jr paint_next_fuel_attribute
+
+restore_fuel_attributes:
+    ld a,(fuel_active)
+    or a
+    ret z
+    call prepare_fuel_attribute_geometry
+    ld a,0x4c                       ; ordinary green land / blue water cells
+    ld (object_attr_value),a
+    ld a,(fuel_attr_rows_remaining)
+    ld (object_attr_rows),a
+    jp paint_object_attribute_cells
+
+prepare_fuel_attribute_geometry:
+    ; The bitmap scrolls every pixel, but standard Spectrum colour remains on
+    ; the 8-line attribute grid. Pick the dominant letter in a split cell so
+    ; the four stable bands track F/U/E/L as closely as that hardware permits.
+    ld a,1                          ; one attribute column: vertical 8px depot
+    ld (object_attr_width),a
+    ld a,(fuel_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(fuel_y)
+    ld b,a
+    srl a
+    srl a
+    srl a
+    ld (object_attr_row),a
+    ld a,b
+    and 7
+    ld a,4                          ; aligned 32px object occupies four cells
+    jr z,fuel_attr_rows_ready
+    inc a                           ; pixel scrolling can extend it into a fifth
+fuel_attr_rows_ready:
+    ld (fuel_attr_rows_remaining),a
+    ret
+
 paint_crash_attributes:
     ; A yellow 24x24 attribute envelope makes the small XOR explosion read as
     ; fire. It need not be restored: the next life redraws the whole course.
@@ -211,7 +449,9 @@ paint_object_attribute_cells:
     ret z
 paint_object_attribute_row:
     ld a,(object_attr_row)
-    cp 24
+    or a
+    jr z,advance_object_attribute_row
+    cp 23
     ret nc
     ld b,a
     and 7
@@ -235,6 +475,7 @@ paint_object_attribute_byte:
     ld (hl),a
     inc hl
     djnz paint_object_attribute_byte
+advance_object_attribute_row:
     ld a,(object_attr_row)
     inc a
     ld (object_attr_row),a
@@ -251,20 +492,16 @@ paint_object_attribute_byte:
 ;
 ; Rotating every sprite row at runtime made the cost depend heavily on X & 7:
 ; a frame where several objects happened to sit at shift seven could miss the
-; 50 Hz budget.  Build all eight three-byte variants once at startup instead.
+; 50 Hz budget. Build all eight three-byte variants once at startup instead.
+; The wider ship has a separate five-byte table emitted with the source because
+; its 32-bit expansion would make this compact 16-bit cache builder slower and
+; more complicated for a transformation that never changes. Two-pixel
+; projectiles use a smaller direct mask table and are not built here.
 
 init_shifted_sprites:
     ld hl,player_jet_sprite
     ld de,player_shift_data
     ld b,13
-    call build_shifted_sprite
-    ld hl,bullet_sprite
-    ld de,bullet_shift_data
-    ld b,4
-    call build_shifted_sprite
-    ld hl,atari_ship_sprite
-    ld de,ship_shift_data
-    ld b,8
     call build_shifted_sprite
     ld hl,enemy_plane_sprite
     ld de,enemy_plane_shift_data
@@ -272,6 +509,26 @@ init_shifted_sprites:
     call build_shifted_sprite
     ld hl,atari_helicopter_sprite
     ld de,helicopter_shift_data
+    ld b,10
+    call build_shifted_sprite
+    ld hl,atari_helicopter_sprite_alt
+    ld de,helicopter_alt_shift_data
+    ld b,10
+    call build_shifted_sprite
+    ld hl,atari_helicopter_sprite_left
+    ld de,helicopter_left_shift_data
+    ld b,10
+    call build_shifted_sprite
+    ld hl,atari_helicopter_sprite_left_alt
+    ld de,helicopter_left_alt_shift_data
+    ld b,10
+    call build_shifted_sprite
+    ld hl,tank_facing_right_sprite
+    ld de,tank_right_shift_data
+    ld b,10
+    call build_shifted_sprite
+    ld hl,tank_facing_left_sprite
+    ld de,tank_left_shift_data
     ld b,10
     call build_shifted_sprite
     ld hl,explosion_sprite_0
@@ -622,10 +879,13 @@ store_fork_step:
 
 
 ; ---------------------------------------------------------------------------
-; Full redraw (startup and R only)
+; Full-row reconstruction (whole screen at startup; isolated road repairs)
 ; ---------------------------------------------------------------------------
 
 full_redraw:
+    ; Clear everything first, including stale sprites and text from a previous
+    ; life. The loop below deliberately reconstructs only playfield Y=8..183;
+    ; update_hud_if_dirty owns the top eight lines and row 23 stays black.
     ld hl,0x4000
     xor a
     ld (hl),a
@@ -633,13 +893,30 @@ full_redraw:
     ld bc,6143
     ldir
 
-    xor a
+    ld a,8                       ; first scanline below the HUD
     ld (redraw_y),a
 full_redraw_row:
     ld a,(redraw_y)
+    call render_full_world_row
+    ld a,(redraw_y)
+    inc a
+    ld (redraw_y),a
+    cp 184                       ; first scanline of the lower margin
+    jr nz,full_redraw_row
+    ret
+
+render_full_world_row:
+    ; Input A=one playfield scanline. Unlike render_v3_row, this writes every
+    ; byte of both banks and the complete island. It is intentionally reserved
+    ; for startup and rows which a road/bridge operation cleared completely.
+    cp 8
+    ret c
+    cp 184
+    ret nc
+    ld (dirty_y),a
     call calc_screen_line_addr
     ld (row_screen_addr),hl
-    ld a,(redraw_y)
+    ld a,(dirty_y)
     call get_block_index_for_y
     ld a,l
     ld (row_block_index),a
@@ -705,13 +982,7 @@ full_right_land:
     djnz full_right_land
 
 full_draw_island:
-    call draw_current_island_full
-    ld a,(redraw_y)
-    inc a
-    ld (redraw_y),a
-    cp 192
-    jr nz,full_redraw_row
-    ret
+    jp draw_current_island_full
 
 draw_current_island_full:
     ld a,(row_block_index)
@@ -746,9 +1017,12 @@ full_island_bytes:
 ;
 ;     (course_phase - y) & 7 < s
 ;
-; The matching residues are enumerated directly.  No 192-line scan is needed.
+; The matching residues are enumerated directly. HUD and lower margin rows are
+; excluded, so no full-screen scan is needed.
 
 render_dirty_rows:
+    ; One residue class modulo eight changes for each scrolled pixel. At fast
+    ; speed two residue classes are visited; no per-line change test is needed.
     ld a,(course_phase)
     ld (dirty_first_y),a
     ld a,(speed_pixels)
@@ -756,13 +1030,20 @@ render_dirty_rows:
 dirty_residue_loop:
     ld a,(dirty_first_y)
     ld (dirty_y),a
+    call get_block_index_for_y
+    ld a,l
+    ld (row_block_index),a
 dirty_row_loop:
-    call render_v3_row
+    call render_v3_row_indexed
     ld a,(dirty_y)
     add a,8
-    cp 192
+    cp 184
     jr nc,dirty_next_residue
     ld (dirty_y),a
+    ld a,(row_block_index)
+    dec a
+    and 31
+    ld (row_block_index),a
     jr dirty_row_loop
 dirty_next_residue:
     ld a,(dirty_first_y)
@@ -776,13 +1057,29 @@ dirty_next_residue:
     ret
 
 render_v3_row:
+    ; Bridge repair and the dirty pass share this entry, so enforce the HUD and
+    ; lower-margin ownership here as a final safety net.
     ld a,(dirty_y)
-    call calc_screen_line_addr
-    ld (row_screen_addr),hl
+    cp 8
+    ret c
+    cp 184
+    ret nc
     ld a,(dirty_y)
     call get_block_index_for_y
     ld a,l
     ld (row_block_index),a
+
+render_v3_row_indexed:
+    ; Dirty rows advance by exactly eight scanlines, so their circular block
+    ; index is maintained by the caller. Bridge repair still enters above and
+    ; calculates the first index normally.
+    ld a,(dirty_y)
+    cp 8
+    ret c
+    cp 184
+    ret nc
+    call calc_screen_line_addr
+    ld (row_screen_addr),hl
 
     ; Left bank: land, partial edge, water.
     ld h,HIGH(block_left_col)
@@ -1114,6 +1411,19 @@ calc_safe_river_x:
     add a,d
     ret
 
+calc_safe_river_x_wide:
+    ; get_pixel_lane_bounds reserves 16 pixels. A 32-pixel ship needs another
+    ; 16 pixels removed from the right-hand end before taking the midpoint.
+    ld c,0
+    call get_pixel_lane_bounds
+    ld a,e
+    sub 16
+    ld e,a
+    sub d
+    srl a
+    add a,d
+    ret
+
 calc_screen_line_addr:
     ; Input A = logical Y, output HL = Spectrum bitmap line address.
     add a,a
@@ -1134,12 +1444,15 @@ screen_table_page_ready:
 ; ---------------------------------------------------------------------------
 ;
 ; The original Atari object data is eight bits wide and displayed doubled in
-; X.  The tables below preserve that 2:1 pixel shape as 16-pixel Spectrum
-; sprites.  Every moving object is erased before the river update and redrawn
-; afterwards.  The player is also included so future collision/steering work
-; can safely alter the background under it.
+; X. Most tables below preserve that 2:1 pixel shape as 16-pixel Spectrum
+; sprites; the ships use a separate 32-pixel cache. Every moving object is
+; erased before the river update and redrawn afterwards. The player is also
+; included so collision and steering may safely alter the background under it.
 
 init_entities:
+    ; All spawn Y values lie inside the 176-line playfield. River-bound actors
+    ; ask the current course sample for a safe X; the crossing aircraft is the
+    ; exception because it intentionally flies over water and land.
     ld a,170
     ld (player_y),a
     call calc_safe_river_x
@@ -1147,22 +1460,32 @@ init_entities:
 
     ld a,24
     ld (ship0_y),a
-    call calc_safe_river_x
+    call calc_safe_river_x_wide
     ld (ship0_x),a
+    ld a,1
+    ld (ship0_active),a
+    xor a
+    ld (ship0_delay),a
 
     ld a,92
     ld (ship1_y),a
-    call calc_safe_river_x
+    call calc_safe_river_x_wide
     ld (ship1_x),a
     ld a,1
     ld (ship1_dir),a
     ld a,2
     ld (ship1_timer),a
+    xor a
+    ld (ship1_active),a
+    ld a,80
+    ld (ship1_delay),a
 
     ld a,56
     ld (enemy_plane_y),a
     xor a
     ld (enemy_plane_x),a
+    inc a
+    ld (enemy_plane_active),a
 
     ld a,126
     ld (helicopter_y),a
@@ -1171,6 +1494,30 @@ init_entities:
     ld a,1
     ld (helicopter_move),a
     ld (helicopter_dir),a
+    xor a
+    ld (helicopter_frame),a
+    ld a,2
+    ld (helicopter_anim_timer),a
+    xor a
+    ld (helicopter_active),a
+    ld a,140
+    ld (helicopter_delay),a
+
+    ld a,112                         ; fully visible and clear of the player
+    ld (fuel_y),a
+    call calc_safe_river_x
+    and 0xf8                         ; vertical FUEL occupies one bitmap byte
+    ld (fuel_x),a
+    ld a,1
+    ld (fuel_active),a
+    ld (fuel_refill_timer),a
+    xor a
+    ld (fuel_delay),a
+    ld (fuel_refueling),a
+    ld a,48
+    ld (fuel_level),a
+    ld a,32
+    ld (fuel_consume_timer),a
 
     ld a,46
     ld (tank_y),a
@@ -1181,9 +1528,22 @@ init_entities:
     ld a,(tank_y)
     call calc_tank_col
     ld (tank_col),a
+    add a,a
+    add a,a
+    add a,a
+    ld (tank_x),a
+    ld a,72
+    ld (tank_fire_timer),a
     xor a
     ld (tank_delay),a
+    ld (tank_shell_active),a
+    ld (bridge_tank_active),a
+    ld (bridge_tank_mode),a
+    ld (bridge_tank_next_mode),a
+    ld (bridge_tank_side),a
+    ld (bridge_tank_move_phase),a
     ld (bridge_active),a
+    ld (destroyed_road_active),a
     ld (player_move),a
     ld (bullet_active),a
     ld (fire_pending),a
@@ -1192,11 +1552,18 @@ init_entities:
     ld (explosion_timer),a
     ld (explosion_anim_timer),a
     ld (explosion_frame),a
+    ld (hit_explosion_active),a
+    ld (explosion_sound_timer),a
     ld (slow_phase),a
     ld (joystick_state),a
+    ld a,1
+    ld (requested_speed),a
+    ld (speed_pixels),a
     ret
 
 restore_entities:
+    ; XOR is its own inverse. This must use exactly the same coordinates and
+    ; animation frame that were used by the preceding draw_entities call.
     jp xor_entities
 
 draw_entities:
@@ -1233,29 +1600,96 @@ xor_explosion_table_ready:
 xor_entities_bullet:
     ld a,(bullet_active)
     or a
-    jr z,xor_entities_ship0
+    jr z,xor_entities_tank_shell
     ld a,(bullet_x)
+    add a,7
     ld c,a
     ld a,(bullet_y)
     ld b,4
-    ld de,bullet_shift_table
-    call xor_sprite_shifted_2xn
+    call xor_projectile_2xn
+
+xor_entities_tank_shell:
+    ; The bank tank fires the same two-pixel-wide primitive, but only two rows
+    ; high. tank_shell_x is already the real left edge of those solid pixels.
+    ld a,(tank_shell_active)
+    or a
+    jr z,xor_entities_ship0
+    cp 1
+    jr nz,xor_entities_tank_splash
+    ld a,(tank_shell_x)
+    ld c,a
+    ld a,(tank_shell_y)
+    ld b,2
+    call xor_projectile_2xn
+    jr xor_entities_ship0
+
+xor_entities_tank_splash:
+    ; Once the shot reaches its chosen water point it becomes a short,
+    ; byte-aligned two-frame splash instead of flying across the whole river.
+    ld de,tank_splash_sprite_0
+    ld a,(tank_splash_timer)
+    cp 6
+    jr nc,tank_splash_frame_ready
+    ld de,tank_splash_sprite_1
+tank_splash_frame_ready:
+    ld a,(tank_shell_x)
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(tank_shell_y)
+    ld b,6
+    call xor_sprite_2xn
 
 xor_entities_ship0:
+    ; Ships are 32 pixels wide and therefore use the five-byte spill cache.
+    ; All other freely positioned actors remain 16-pixel/three-byte sprites.
+    ld a,(ship0_active)
+    or a
+    jr z,xor_entities_ship1
     ld a,(ship0_x)
     ld c,a
     ld a,(ship0_y)
     ld b,8
-    ld de,ship_shift_table
-    call xor_sprite_shifted_2xn
+    ld de,ship_wide_shift_table
+    call xor_sprite_shifted_4xn
 
+xor_entities_ship1:
+    ld a,(ship1_active)
+    or a
+    jr z,xor_entities_fuel
     ld a,(ship1_x)
     ld c,a
     ld a,(ship1_y)
     ld b,8
-    ld de,ship_shift_table
-    call xor_sprite_shifted_2xn
+    ld de,ship_wide_shift_table
+    push af
+    ld a,(ship1_dir)
+    cp 255
+    jr nz,ship1_sprite_direction_ready
+    ld de,ship_left_wide_shift_table
+ship1_sprite_direction_ready:
+    pop af
+    call xor_sprite_shifted_4xn
 
+xor_entities_fuel:
+    ld a,(fuel_active)
+    or a
+    jr z,xor_entities_enemy_plane
+    ld a,(fuel_x)
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(fuel_y)
+    ld b,32
+    ld de,fuel_vertical_sprite
+    call xor_sprite_1xn
+
+xor_entities_enemy_plane:
+    ld a,(enemy_plane_active)
+    or a
+    jr z,xor_entities_helicopter
     ld a,(enemy_plane_x)
     ld c,a
     ld a,(enemy_plane_y)
@@ -1263,36 +1697,90 @@ xor_entities_ship0:
     ld de,enemy_plane_shift_table
     call xor_sprite_shifted_2xn
 
+xor_entities_helicopter:
+    ld a,(helicopter_active)
+    or a
+    jr z,xor_entities_hit_explosion
     ld a,(helicopter_x)
     ld c,a
     ld a,(helicopter_y)
     ld b,10
     ld de,helicopter_shift_table
+    push af
+    ld a,(helicopter_dir)
+    cp 255
+    jr nz,helicopter_choose_right_frame
+    ld de,helicopter_left_shift_table
+    ld a,(helicopter_frame)
+    or a
+    jr z,helicopter_frame_ready
+    ld de,helicopter_left_alt_shift_table
+    jr helicopter_frame_ready
+helicopter_choose_right_frame:
+    ld a,(helicopter_frame)
+    or a
+    jr z,helicopter_frame_ready
+    ld de,helicopter_alt_shift_table
+helicopter_frame_ready:
+    pop af
     call xor_sprite_shifted_2xn
 
+xor_entities_hit_explosion:
+    ; Enemy impacts reuse the player's three explosion silhouettes, but have
+    ; independent coordinates and a much shorter lifetime.
+    ld a,(hit_explosion_active)
+    or a
+    jr z,xor_entities_tank
+    ld de,explosion_0_shift_table
+    ld a,(hit_explosion_frame)
+    or a
+    jr z,hit_explosion_table_ready
+    ld de,explosion_1_shift_table
+    cp 1
+    jr z,hit_explosion_table_ready
+    ld de,explosion_2_shift_table
+hit_explosion_table_ready:
+    ld a,(hit_explosion_x)
+    ld c,a
+    ld a,(hit_explosion_y)
+    ld b,13
+    call xor_sprite_shifted_2xn
+
+xor_entities_tank:
     ld a,(tank_active)
     or a
-    jr z,xor_life_icons
-    ld a,(tank_col)
+    jr z,xor_entities_bridge_tank
+    ld a,(tank_x)
     ld c,a
     ld a,(tank_y)
     ld b,10
-    ld de,atari_tank_sprite
-    call xor_sprite_2xn
+    ld de,tank_right_shift_table
+    push af
+    ld a,(tank_side)
+    or a
+    jr z,tank_sprite_direction_ready
+    ld de,tank_left_shift_table
+tank_sprite_direction_ready:
+    pop af
+    call xor_sprite_shifted_2xn
 
-xor_life_icons:
-    ld a,(lives)
+xor_entities_bridge_tank:
+    ld a,(bridge_tank_active)
     or a
     ret z
-    ld de,life_icon_one_sprite
-    cp 2
-    jr c,xor_life_icon_table_ready
-    ld de,life_icon_two_sprite
-xor_life_icon_table_ready:
-    ld c,0
-    ld a,1
-    ld b,7
-    jp xor_sprite_2xn
+    ld a,(bridge_tank_x)
+    ld c,a
+    ld a,(bridge_tank_y)
+    ld b,10
+    ld de,tank_right_shift_table
+    push af
+    ld a,(bridge_tank_side)
+    or a
+    jr z,bridge_tank_sprite_direction_ready
+    ld de,tank_left_shift_table
+bridge_tank_sprite_direction_ready:
+    pop af
+    jp xor_sprite_shifted_2xn
 
 xor_sprite_2xn:
     ; Input A=Y, C=byte column, B=height, DE=two-byte-per-row pattern.
@@ -1333,6 +1821,126 @@ xor_sprite_row:
     ld (hl),a
     inc de
     djnz xor_sprite_row
+    ld sp,(sprite_saved_sp)
+    ei
+    ret
+
+xor_sprite_1xn:
+    ; Input A=Y, C=byte column, B=height, DE=one-byte-per-row pattern.
+    ; Vertical FUEL is byte-aligned, so touching a spill byte would only waste
+    ; time. Clip at Y=184 to preserve the intentionally black bottom margin.
+    cp 184
+    ret nc
+    ld l,a
+    ld a,184
+    sub l
+    ld h,a
+    ld a,b
+    cp h
+    jr c,narrow_sprite_rows_ready
+    jr z,narrow_sprite_rows_ready
+    ld b,h
+narrow_sprite_rows_ready:
+    ld a,l
+    add a,a
+    ld l,a
+    ld h,HIGH(screen_line_table)
+    jr nc,narrow_sprite_table_page_ready
+    inc h
+narrow_sprite_table_page_ready:
+    di
+    ld (sprite_saved_sp),sp
+    ld sp,hl
+narrow_sprite_row:
+    pop hl
+    ld a,l
+    add a,c
+    ld l,a
+    ld a,(de)
+    xor (hl)
+    ld (hl),a
+    inc de
+    djnz narrow_sprite_row
+    ld sp,(sprite_saved_sp)
+    ei
+    ret
+
+xor_sprite_shifted_4xn:
+    ; Input A=Y, C=pixel X, B=height, DE=eight-pointer table. A 32-pixel ship
+    ; needs four source bytes and one spill byte after an arbitrary bit shift.
+    ; Keeping it in one pass is substantially cheaper than drawing two 16-bit
+    ; halves with two stack/table setups per ship.
+    cp 192
+    ret nc
+    ld l,a
+    ld a,192
+    sub l
+    ld h,a
+    ld a,b
+    cp h
+    jr c,wide_shifted_rows_ready
+    jr z,wide_shifted_rows_ready
+    ld b,h
+wide_shifted_rows_ready:
+    ld a,l
+    ex af,af'
+    ld a,c
+    and 7
+    add a,a
+    ld l,a
+    ld h,0
+    add hl,de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld c,a
+
+    ex af,af'
+    add a,a
+    ld l,a
+    ld h,HIGH(screen_line_table)
+    jr nc,wide_shifted_table_page_ready
+    inc h
+wide_shifted_table_page_ready:
+    di
+    ld (sprite_saved_sp),sp
+    ld sp,hl
+wide_shifted_sprite_row:
+    pop hl
+    ld a,c
+    add a,l
+    ld l,a
+
+    ld a,(de)
+    xor (hl)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    xor (hl)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    xor (hl)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    xor (hl)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    xor (hl)
+    ld (hl),a
+    inc de
+
+    djnz wide_shifted_sprite_row
     ld sp,(sprite_saved_sp)
     ei
     ret
@@ -1409,14 +2017,92 @@ shifted_sprite_row:
     ei
     ret
 
-bridge_fill_rows:
-    ; Input A=start Y, B=row count, C=byte value. The bridge is maintained as
-    ; a persistent bitmap band: only rows entering or leaving its 16-line
-    ; envelope are touched during scrolling.
+xor_projectile_2xn:
+    ; Input A=Y, C=actual left pixel X, B=height. Both projectiles are a solid
+    ; two-pixel column. The generic 16-pixel blitter would fetch and touch
+    ; three screen bytes per row; this hot path needs only two, which keeps a
+    ; bridge frame with both simultaneous shots inside the 50 Hz budget.
     cp 192
     ret nc
     ld l,a
     ld a,192
+    sub l
+    ld h,a
+    ld a,b
+    cp h
+    jr c,projectile_rows_ready
+    jr z,projectile_rows_ready
+    ld b,h
+projectile_rows_ready:
+    ; Preserve Y while HL indexes the two-byte mask for X&7. DE then holds the
+    ; mask for every row: E is the first screen byte, D the possible spill.
+    ld a,l
+    ex af,af'
+    ld a,c
+    and 7
+    add a,a
+    ld e,a
+    ld d,0
+    ld hl,projectile_mask_table
+    add hl,de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld c,a
+
+    ex af,af'
+    add a,a
+    ld l,a
+    ld h,HIGH(screen_line_table)
+    jr nc,projectile_table_page_ready
+    inc h
+projectile_table_page_ready:
+    di
+    ld (sprite_saved_sp),sp
+    ld sp,hl
+projectile_sprite_row:
+    pop hl
+    ld a,c
+    add a,l
+    ld l,a
+    ld a,e
+    xor (hl)
+    ld (hl),a
+    inc l
+    ld a,d
+    xor (hl)
+    ld (hl),a
+    djnz projectile_sprite_row
+    ld sp,(sprite_saved_sp)
+    ei
+    ret
+
+bridge_fill_rows:
+    ; Input A=start Y, B=row count, C=byte value. The bridge is maintained as
+    ; a persistent bitmap band: only rows entering or leaving its 16-line
+    ; envelope are touched during scrolling. The two clipping stages remove
+    ; HUD rows at the top and the black character row at the bottom.
+    cp 8
+    jr nc,bridge_fill_top_clipped
+    ld l,a
+    ld a,8
+    sub l
+    cp b
+    ret nc
+    ld e,a
+    ld a,b
+    sub e
+    ld b,a
+    ld a,8
+bridge_fill_top_clipped:
+    cp 184
+    ret nc
+    ld l,a
+    ld a,184
     sub l
     cp b
     jr nc,bridge_fill_count_ready
@@ -1454,34 +2140,51 @@ bridge_fill_byte:
     ret
 
 bridge_refresh_edges:
-    ; The bank renderer may rewrite the two bytes at either end of a bridge.
-    ; Refresh only those four bytes, leaving its broad interior untouched.
-    cp 192
+    ; The bank pass touches only speed_pixels residue classes modulo eight.
+    ; A 16-line bridge therefore has two affected rows per residue: four rows
+    ; at fast speed, not all sixteen. Enumerating the same residues as
+    ; render_dirty_rows removes the former worst-case bridge bottleneck.
+    ld a,(course_phase)
+    ld (bridge_edge_residue),a
+    ld a,(speed_pixels)
+    ld (bridge_edge_residues),a
+bridge_refresh_residue:
+    ; First affected row is bridge_y plus the modulo-eight distance to this
+    ; dirty residue. The second is exactly eight scanlines below it.
+    ld a,(bridge_y)
+    and 7
+    ld b,a
+    ld a,(bridge_edge_residue)
+    sub b
+    and 7
+    ld b,a
+    ld a,(bridge_y)
+    add a,b
+    ld (bridge_edge_y),a
+    call bridge_refresh_edge_row
+    ld a,(bridge_edge_y)
+    add a,8
+    call bridge_refresh_edge_row
+
+    ld a,(bridge_edge_residue)
+    dec a
+    and 7
+    ld (bridge_edge_residue),a
+    ld a,(bridge_edge_residues)
+    dec a
+    ld (bridge_edge_residues),a
+    jr nz,bridge_refresh_residue
+    ret
+
+bridge_refresh_edge_row:
+    ; Input A=one dirty bridge Y. HUD and lower margin remain immutable.
+    cp 8
+    ret c
+    cp 184
     ret nc
-    ld l,a
-    ld a,192
-    sub l
-    cp 16
-    jr c,bridge_refresh_count_ready
-    ld a,16
-bridge_refresh_count_ready:
-    ld (bridge_rows_left),a
-    ld a,l
-    add a,a
-    ld l,a
-    ld h,HIGH(screen_line_table)
-    jr nc,bridge_refresh_table_ready
-    inc h
-bridge_refresh_table_ready:
-    di
-    ld (sprite_saved_sp),sp
-    ld sp,hl
-bridge_refresh_row:
-    pop hl
-    ld a,l
-    ld c,a
+    call calc_screen_line_addr
     ld a,(bridge_col)
-    add a,c
+    add a,l
     ld l,a
     ld (hl),255
     inc l
@@ -1493,18 +2196,22 @@ bridge_refresh_row:
     ld (hl),255
     inc l
     ld (hl),255
-    ld a,(bridge_rows_left)
-    dec a
-    ld (bridge_rows_left),a
-    jr nz,bridge_refresh_row
-    ld sp,(sprite_saved_sp)
-    ei
     ret
 
-bridge_paint_attributes:
-    ; Input C=attribute value. A 16-line bridge covers two attribute rows when
-    ; aligned and three while between cells. Stock Spectrum colour therefore
-    ; advances in 8-line steps even though the bitmap itself moves every pixel.
+bridge_paint_road_attributes:
+    ; A 16-line bridge covers two attribute rows when aligned and three while
+    ; between cells. White-on-black road attributes fill the land on both
+    ; sides; the river span is then overwritten with the brown bridge colour.
+    ld a,0x0a
+    ld (bridge_center_attr),a
+    jr bridge_paint_road_attribute_span
+
+bridge_paint_destroyed_road_attributes:
+    ; Broken bridge: retain both white approaches but restore blue water in
+    ; the former span. The road remnant continues scrolling with the world.
+    ld a,0x4c
+    ld (bridge_center_attr),a
+bridge_paint_road_attribute_span:
     ld a,(bridge_y)
     srl a
     srl a
@@ -1519,30 +2226,8 @@ bridge_attr_count_ready:
     ld (bridge_attr_rows),a
 bridge_attr_row_loop:
     ld a,(bridge_attr_row)
-    cp 24
-    ret nc
-    ld b,a
-    and 7
-    rrca
-    rrca
-    rrca
-    ld l,a
-    ld a,(bridge_col)
-    add a,l
-    ld l,a
-    ld a,b
-    srl a
-    srl a
-    srl a
-    add a,0x58
-    ld h,a
-    ld a,(bridge_width)
-    ld b,a
-    ld a,c
-bridge_attr_byte:
-    ld (hl),a
-    inc hl
-    djnz bridge_attr_byte
+    call bridge_paint_road_attribute_row
+advance_bridge_attribute_row:
     ld a,(bridge_attr_row)
     inc a
     ld (bridge_attr_row),a
@@ -1552,10 +2237,41 @@ bridge_attr_byte:
     jr nz,bridge_attr_row_loop
     ret
 
-bridge_paint_attribute_row:
-    ; Input A=attribute row (0..23), C=value.  Used by the moving bridge to
-    ; update only the one 8-pixel colour strip entering or leaving its range.
-    cp 24
+bridge_clear_road_attributes:
+    ; Restore every attribute cell touched by the road, not merely the river
+    ; span. This prevents white bank rectangles remaining after destruction.
+    ld a,(bridge_y)
+    srl a
+    srl a
+    srl a
+    ld (bridge_attr_row),a
+    ld a,(bridge_y)
+    and 7
+    ld a,2
+    jr z,bridge_clear_attr_count_ready
+    inc a
+bridge_clear_attr_count_ready:
+    ld (bridge_attr_rows),a
+bridge_clear_attr_loop:
+    ld a,(bridge_attr_row)
+    ld c,0x4c
+    call bridge_paint_full_attribute_row
+    ld a,(bridge_attr_row)
+    inc a
+    ld (bridge_attr_row),a
+    ld a,(bridge_attr_rows)
+    dec a
+    ld (bridge_attr_rows),a
+    jr nz,bridge_clear_attr_loop
+    ret
+
+bridge_paint_road_attribute_row:
+    ; Input A=attribute row. Paint the left road, bridge and right road in one
+    ; 32-byte pass. The previous full-white pass followed by a brown overwrite
+    ; touched the wide river span twice and caused visible bridge-frame stalls.
+    or a
+    ret z
+    cp 23
     ret nc
     ld b,a
     and 7
@@ -1563,8 +2279,58 @@ bridge_paint_attribute_row:
     rrca
     rrca
     ld l,a
+    ld a,b
+    srl a
+    srl a
+    srl a
+    add a,0x58
+    ld h,a
+
     ld a,(bridge_col)
-    add a,l
+    or a
+    jr z,bridge_attr_paint_span
+    ld b,a
+    ld a,0x47                       ; BRIGHT white ink, black road markings
+bridge_attr_left_byte:
+    ld (hl),a
+    inc l
+    djnz bridge_attr_left_byte
+bridge_attr_paint_span:
+    ld a,(bridge_width)
+    ld b,a
+    ld a,(bridge_center_attr)       ; brown intact span or normal broken water
+bridge_attr_span_byte:
+    ld (hl),a
+    inc l
+    djnz bridge_attr_span_byte
+
+    ld a,(bridge_col)
+    ld b,a
+    ld a,(bridge_width)
+    add a,b
+    ld b,a
+    ld a,32
+    sub b
+    ret z
+    ld b,a
+    ld a,0x47
+bridge_attr_right_byte:
+    ld (hl),a
+    inc l
+    djnz bridge_attr_right_byte
+    ret
+
+bridge_paint_full_attribute_row:
+    ; Input A=row (1..22), C=value. Paint all 32 cells in that character row.
+    or a
+    ret z
+    cp 23
+    ret nc
+    ld b,a
+    and 7
+    rrca
+    rrca
+    rrca
     ld l,a
     ld a,b
     srl a
@@ -1572,13 +2338,26 @@ bridge_paint_attribute_row:
     srl a
     add a,0x58
     ld h,a
-    ld a,(bridge_width)
-    ld b,a
+    ld b,4
     ld a,c
-bridge_one_attr_byte:
+bridge_full_attr_byte:
     ld (hl),a
-    inc hl
-    djnz bridge_one_attr_byte
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    djnz bridge_full_attr_byte
     ret
 
 bridge_update_attributes:
@@ -1603,7 +2382,7 @@ bridge_update_attributes:
     jr z,bridge_attr_top_unchanged
     ld a,b
     ld c,0x4c
-    call bridge_paint_attribute_row
+    call bridge_paint_full_attribute_row
 bridge_attr_top_unchanged:
     ld a,(bridge_y)
     sub d
@@ -1619,8 +2398,7 @@ bridge_attr_top_unchanged:
     srl a
     cp b
     ret z
-    ld c,0x0a
-    jp bridge_paint_attribute_row
+    jp bridge_paint_road_attribute_row
 
 
 ; ---------------------------------------------------------------------------
@@ -1628,12 +2406,19 @@ bridge_attr_top_unchanged:
 ; ---------------------------------------------------------------------------
 
 update_entities:
+    ; Order matters: player steering precedes collisions, the scrolling actors
+    ; advance before the projectile test, and bridge exclusion runs last so a
+    ; freshly respawned ship/helicopter cannot share its vertical band.
     call update_player
+    call update_hit_explosion
     call advance_ship0
     call advance_ship1
     call advance_enemy_plane
     call advance_helicopter
+    call update_fuel
     call update_tank
+    call update_bridge_tank
+    call update_tank_shell
     call update_bridge
     call update_bullet
     call keep_water_objects_off_bridge
@@ -1666,34 +2451,115 @@ store_player_x:
     ld (player_x),a
     ret
 
+can_spawn_water_enemy:
+    ; Cap combat sprites over the river at two simultaneous actors. FUEL and
+    ; tanks have independent gameplay roles and are not counted in this budget.
+    ld b,0
+    ld a,(ship0_active)
+    add a,b
+    ld b,a
+    ld a,(ship1_active)
+    add a,b
+    ld b,a
+    ld a,(helicopter_active)
+    add a,b
+    ld b,a
+    ld a,(enemy_plane_active)
+    add a,b
+    cp 2
+    jr c,water_enemy_slot_available
+    xor a
+    ret
+water_enemy_slot_available:
+    ld a,1
+    ret
+
 advance_ship0:
+    ; Y follows river scroll. Leaving or destruction starts a quiet interval;
+    ; respawn is also held until one of the two combat-sprite slots is free.
+    ld a,(ship0_active)
+    or a
+    jr z,wait_for_ship0
     ld a,(speed_pixels)
     ld b,a
     ld a,(ship0_y)
     add a,b
-    cp 192
+    cp 184
     jr c,store_ship0_y
     xor a
-    ld (ship0_y),a
-    call calc_safe_river_x
-    ld (ship0_x),a
+    ld (ship0_active),a
+    ld a,160
+    ld (ship0_delay),a
     ret
 store_ship0_y:
     ld (ship0_y),a
     ret
+wait_for_ship0:
+    ld a,(ship0_delay)
+    or a
+    jr z,try_spawn_ship0
+    dec a
+    ld (ship0_delay),a
+    ret
+try_spawn_ship0:
+    call can_spawn_water_enemy
+    or a
+    jr nz,spawn_ship0
+    ld a,16
+    ld (ship0_delay),a
+    ret
+spawn_ship0:
+    ld a,1
+    ld (ship0_active),a
+    ld a,8
+    call choose_clear_water_actor_y
+    ld (ship0_y),a
+    call calc_safe_river_x_wide
+    ld (ship0_x),a
+    ret
 
 advance_ship1:
+    ld a,(ship1_active)
+    or a
+    jr z,wait_for_ship1
     ld a,(speed_pixels)
     ld b,a
     ld a,(ship1_y)
     add a,b
-    cp 192
+    cp 184
     jr c,store_ship1_y
     xor a
+    ld (ship1_active),a
+    ld a,160
+    ld (ship1_delay),a
+    ret
+wait_for_ship1:
+    ld a,(ship1_delay)
+    or a
+    jr z,try_spawn_ship1
+    dec a
+    ld (ship1_delay),a
+    ret
+try_spawn_ship1:
+    call can_spawn_water_enemy
+    or a
+    jr nz,spawn_ship1
+    ld a,16
+    ld (ship1_delay),a
+    ret
+spawn_ship1:
+    ld a,1
+    ld (ship1_active),a
+    ld a,8
+    call choose_clear_water_actor_y
     ld (ship1_y),a
-    call calc_safe_river_x
+    call calc_safe_river_x_wide
     ld (ship1_x),a
-    jr patrol_ship1
+    ld a,1
+    ld (ship1_dir),a
+    ld a,2
+    ld (ship1_timer),a
+    ret
 store_ship1_y:
     ld (ship1_y),a
 
@@ -1710,6 +2576,10 @@ patrol_ship1:
     ld c,a
     ld a,(ship1_y)
     call get_pixel_lane_bounds
+    ; The generic bounds reserve 16 pixels; subtract another 16 for this hull.
+    ld a,e
+    sub 16
+    ld e,a
     ld a,(ship1_dir)
     cp 255
     jr z,ship1_patrol_left
@@ -1742,14 +2612,19 @@ ship1_turn_right:
 advance_enemy_plane:
     ; The aircraft crosses land and water at three real pixels per frame, but
     ; its Y advances with the course. It stays on the world line on which it
-    ; started instead of being pinned to the monitor.
+    ; started instead of being pinned to the monitor. Once shot down it stays
+    ; absent until the scene is initialized again.
+    ld a,(enemy_plane_active)
+    or a
+    ret z
     ld a,(speed_pixels)
     ld b,a
     ld a,(enemy_plane_y)
     add a,b
-    cp 192
+    cp 184
     jr c,store_enemy_plane_y
-    xor a
+    ld a,8
+    call choose_clear_water_actor_y
 store_enemy_plane_y:
     ld (enemy_plane_y),a
 
@@ -1762,14 +2637,316 @@ store_enemy_plane_x:
     ld (enemy_plane_x),a
     ret
 
+update_hit_explosion:
+    ; Impact fire is attached to the world like other river objects. It moves
+    ; down with the course and advances through three five-frame silhouettes.
+    ld a,(hit_explosion_active)
+    or a
+    ret z
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(hit_explosion_y)
+    add a,b
+    cp 184
+    jr nc,finish_hit_explosion
+    ld (hit_explosion_y),a
+
+    ld a,(hit_explosion_timer)
+    dec a
+    ld (hit_explosion_timer),a
+    jr z,finish_hit_explosion
+    ld a,(hit_explosion_anim_timer)
+    dec a
+    ld (hit_explosion_anim_timer),a
+    ret nz
+    ld a,5
+    ld (hit_explosion_anim_timer),a
+    ld a,(hit_explosion_frame)
+    inc a
+    cp 3
+    jr c,store_hit_explosion_frame
+    ld a,2
+store_hit_explosion_frame:
+    ld (hit_explosion_frame),a
+    ret
+finish_hit_explosion:
+    xor a
+    ld (hit_explosion_active),a
+    ret
+
+start_hit_explosion:
+    ; Input A=X of the 16-pixel effect, B=actor Y. Clamp it to the playfield,
+    ; then restart both the visual animation and the AY impact burst.
+    ld (hit_explosion_x),a
+    ld a,b
+    cp 10
+    jr nc,hit_explosion_has_top_room
+    ld a,8
+    jr hit_explosion_y_ready
+hit_explosion_has_top_room:
+    sub 2
+    cp 172
+    jr c,hit_explosion_y_ready
+    ld a,171
+hit_explosion_y_ready:
+    ld (hit_explosion_y),a
+    ld a,15
+    ld (hit_explosion_timer),a
+    ld a,5
+    ld (hit_explosion_anim_timer),a
+    xor a
+    ld (hit_explosion_frame),a
+    inc a
+    ld (hit_explosion_active),a
+    jp start_ay_explosion
+
+choose_clear_water_actor_y:
+    ; Input A=preferred Y, output A=a free world line. Respawning everything
+    ; at Y=8 allowed two XOR silhouettes to occupy the same pixels and turn
+    ; into a composite "monster". Try vertically separated 16-pixel lanes.
+    ld (actor_spawn_y),a
+    ld a,10
+    ld (actor_spawn_attempts),a
+choose_actor_y_again:
+    ld a,(actor_spawn_y)
+    ld b,a
+    ld a,(ship0_active)
+    or a
+    jr z,check_ship1_spawn_y
+    ld a,(ship0_y)
+    call actor_y_too_close
+    jr c,try_next_actor_y
+check_ship1_spawn_y:
+    ld a,(ship1_active)
+    or a
+    jr z,check_helicopter_spawn_y
+    ld a,(ship1_y)
+    call actor_y_too_close
+    jr c,try_next_actor_y
+check_helicopter_spawn_y:
+    ld a,(helicopter_active)
+    or a
+    jr z,check_plane_spawn_y
+    ld a,(helicopter_y)
+    call actor_y_too_close
+    jr c,try_next_actor_y
+check_plane_spawn_y:
+    ld a,(enemy_plane_active)
+    or a
+    jr z,check_fuel_spawn_y
+    ld a,(enemy_plane_y)
+    call actor_y_too_close
+    jr c,try_next_actor_y
+check_fuel_spawn_y:
+    ld a,(fuel_active)
+    or a
+    jr z,actor_y_is_clear
+    ld a,(fuel_y)
+    call actor_y_overlaps_fuel
+    jr c,try_next_actor_y
+actor_y_is_clear:
+    ld a,b
+    ret
+try_next_actor_y:
+    ld a,(actor_spawn_y)
+    add a,16
+    cp 168
+    jr c,store_next_actor_y
+    ld a,8
+store_next_actor_y:
+    ld (actor_spawn_y),a
+    ld a,(actor_spawn_attempts)
+    dec a
+    ld (actor_spawn_attempts),a
+    jr nz,choose_actor_y_again
+    ld a,(actor_spawn_y)            ; deterministic fallback in a crowded scene
+    ret
+
+actor_y_too_close:
+    ; Input A=existing actor Y, B=candidate Y. Carry means less than twelve
+    ; scanlines apart, enough for the tallest 10-line water enemy plus a gap.
+    ld c,a
+    ld a,b
+    cp c
+    jr nc,actor_candidate_below
+    ld a,c
+    sub b
+    cp 12
+    ret
+actor_candidate_below:
+    sub c
+    cp 12
+    ret
+
+actor_y_overlaps_fuel:
+    ; Input A=FUEL top, B=candidate combat-actor top. Carry means that the
+    ; candidate's 10-line body plus a two-line gap intersects the full 32-line
+    ; depot. This is used when ships/aircraft spawn after FUEL already exists.
+    ld c,a
+    ld a,b
+    add a,12
+    cp c
+    jr c,actor_clears_fuel
+    jr z,actor_clears_fuel
+    ld a,c
+    cp 152
+    jr nc,fuel_bottom_is_playfield_edge
+    add a,32
+    jr fuel_bottom_ready
+fuel_bottom_is_playfield_edge:
+    ld a,184
+fuel_bottom_ready:
+    cp b
+    jr c,actor_clears_fuel
+    jr z,actor_clears_fuel
+    xor a
+    cp 1                            ; 0 < 1 sets carry in the compact assembler
+    ret
+actor_clears_fuel:
+    or a                            ; clear carry
+    ret
+
+choose_clear_fuel_y:
+    ; Input A=preferred Y, output A=a free top line for the 32-pixel vertical
+    ; depot. A symmetric 32-line gap is deliberately conservative: with only
+    ; two active combat actors it prevents any part of F/U/E/L being XORed
+    ; together with a ship, helicopter, or crossing aircraft.
+    ld (actor_spawn_y),a
+    ld a,5
+    ld (actor_spawn_attempts),a
+choose_fuel_y_again:
+    ld a,(actor_spawn_y)
+    ld b,a
+    ld a,(ship0_active)
+    or a
+    jr z,check_ship1_fuel_y
+    ld a,(ship0_y)
+    call fuel_y_too_close
+    jr c,try_next_fuel_y
+check_ship1_fuel_y:
+    ld a,(ship1_active)
+    or a
+    jr z,check_helicopter_fuel_y
+    ld a,(ship1_y)
+    call fuel_y_too_close
+    jr c,try_next_fuel_y
+check_helicopter_fuel_y:
+    ld a,(helicopter_active)
+    or a
+    jr z,check_plane_fuel_y
+    ld a,(helicopter_y)
+    call fuel_y_too_close
+    jr c,try_next_fuel_y
+check_plane_fuel_y:
+    ld a,(enemy_plane_active)
+    or a
+    jr z,fuel_y_is_clear
+    ld a,(enemy_plane_y)
+    call fuel_y_too_close
+    jr c,try_next_fuel_y
+fuel_y_is_clear:
+    ld a,b
+    ret
+try_next_fuel_y:
+    ld a,(actor_spawn_y)
+    add a,32
+    cp 153                          ; 152 is the last fully visible top line
+    jr c,store_next_fuel_y
+    ld a,8
+store_next_fuel_y:
+    ld (actor_spawn_y),a
+    ld a,(actor_spawn_attempts)
+    dec a
+    ld (actor_spawn_attempts),a
+    jr nz,choose_fuel_y_again
+    ld a,(actor_spawn_y)
+    ret
+
+fuel_y_too_close:
+    ; Input A=existing actor Y, B=candidate FUEL Y. Carry means that their
+    ; top lines differ by less than the depot's full 32-pixel height.
+    ld c,a
+    ld a,b
+    cp c
+    jr nc,fuel_candidate_below
+    ld a,c
+    sub b
+    cp 32
+    ret
+fuel_candidate_below:
+    sub c
+    cp 32
+    ret
+
+choose_actor_y_for_saved_height:
+    ; Input A=preferred Y. Bridge relocation stores the real object height in
+    ; actor_spawn_height; only vertical FUEL needs the wider spacing policy.
+    ld (actor_spawn_y),a
+    ld a,(actor_spawn_height)
+    cp 32
+    ld a,(actor_spawn_y)
+    jp z,choose_clear_fuel_y
+    jp choose_clear_water_actor_y
+
+choose_bridge_safe_actor_y:
+    ; Input A=preferred Y, B=height. First deconflict actors; if that choice
+    ; drifted into the bridge clearance band, retry immediately below it.
+    ld (actor_spawn_y),a
+    ld a,b
+    ld (actor_spawn_height),a
+    ld a,(actor_spawn_y)
+    call choose_actor_y_for_saved_height
+    ld (actor_spawn_y),a
+    ld a,(actor_spawn_height)
+    ld b,a
+    ld a,(actor_spawn_y)
+    call object_overlaps_bridge
+    or a
+    jr z,bridge_safe_actor_y_ready
+    ld a,(bridge_y)
+    add a,24
+    call choose_actor_y_for_saved_height
+    ld (actor_spawn_y),a
+bridge_safe_actor_y_ready:
+    ld a,(actor_spawn_y)
+    ret
+
 advance_helicopter:
+    ; Every pass through the lower edge toggles stationary/patrolling mode.
+    ld a,(helicopter_active)
+    or a
+    jr z,wait_for_helicopter
+    call animate_helicopter_rotor
     ld a,(speed_pixels)
     ld b,a
     ld a,(helicopter_y)
     add a,b
-    cp 192
+    cp 184
     jr c,store_helicopter_y
     xor a
+    ld (helicopter_active),a
+    ld a,160
+    ld (helicopter_delay),a
+    ret
+wait_for_helicopter:
+    ld a,(helicopter_delay)
+    or a
+    jr z,try_spawn_helicopter
+    dec a
+    ld (helicopter_delay),a
+    ret
+try_spawn_helicopter:
+    call can_spawn_water_enemy
+    or a
+    jr nz,spawn_helicopter
+    ld a,16
+    ld (helicopter_delay),a
+    ret
+spawn_helicopter:
+    ld a,1
+    ld (helicopter_active),a
+    ld a,8
+    call choose_clear_water_actor_y
     ld (helicopter_y),a
     call calc_safe_river_x
     ld (helicopter_x),a
@@ -1821,23 +2998,326 @@ helicopter_turn_right:
     ld (helicopter_dir),a
     ret
 
+animate_helicopter_rotor:
+    ; River Raid toggles Heli0/Heli1 every second display frame. Only the two
+    ; rotor rows differ, so the body remains stable at the authentic cadence.
+    ld a,(helicopter_anim_timer)
+    dec a
+    ld (helicopter_anim_timer),a
+    ret nz
+    ld a,2
+    ld (helicopter_anim_timer),a
+    ld a,(helicopter_frame)
+    xor 1
+    ld (helicopter_frame),a
+    ret
+
+update_fuel:
+    ; FUEL is a non-lethal river object. Touching its 8x32 rectangle pauses
+    ; consumption and transfers one unit every five frames; without contact,
+    ; one unit is burned every 32 frames.
+    xor a
+    ld (fuel_refueling),a
+    ld a,(fuel_active)
+    or a
+    jr z,update_fuel_waiting
+
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(fuel_y)
+    add a,b
+    cp 184
+    jr c,store_scrolling_fuel_y
+    xor a
+    ld (fuel_active),a
+    ld a,96
+    ld (fuel_delay),a
+    jp consume_fuel
+store_scrolling_fuel_y:
+    ld (fuel_y),a
+
+check_player_refuels:
+    ld a,8
+    ld (object_collision_width),a
+    ld a,(fuel_x)
+    ld c,a
+    ld a,(fuel_y)
+    ld b,32
+    call player_overlaps_object
+    jr nc,player_not_refueling
+    ld a,1
+    ld (fuel_refueling),a
+    jp refill_player_fuel
+player_not_refueling:
+    ld a,1
+    ld (fuel_refill_timer),a
+    jp consume_fuel
+
+update_fuel_waiting:
+    ld a,(fuel_delay)
+    or a
+    jr z,spawn_fuel
+    dec a
+    ld (fuel_delay),a
+    jp consume_fuel
+spawn_fuel:
+    ld a,8
+    call choose_clear_fuel_y
+    ld (fuel_y),a
+    call calc_safe_river_x
+    and 0xf8
+    ld (fuel_x),a
+    ld a,1
+    ld (fuel_active),a
+    ld (fuel_refill_timer),a
+    jp consume_fuel
+
+refill_player_fuel:
+    ld a,(fuel_refill_timer)
+    dec a
+    ld (fuel_refill_timer),a
+    ret nz
+    ld a,5
+    ld (fuel_refill_timer),a
+    ld a,(fuel_level)
+    cp 48
+    jp nc,start_fuel_ding           ; full tank keeps the higher confirmation ping
+    inc a
+    ld (fuel_level),a
+    push af
+    call start_fuel_ding
+    pop af
+    and 7
+    ret nz
+    jp mark_fuel_hud_dirty
+
+consume_fuel:
+    ld a,(fuel_consume_timer)
+    dec a
+    ld (fuel_consume_timer),a
+    ret nz
+    ld a,32
+    ld (fuel_consume_timer),a
+    ld a,(fuel_level)
+    or a
+    jr z,out_of_fuel
+    dec a
+    ld (fuel_level),a
+    and 7
+    jr nz,check_consumed_fuel_empty
+    call mark_fuel_hud_dirty
+check_consumed_fuel_empty:
+    ld a,(fuel_level)
+    or a
+    ret nz
+out_of_fuel:
+    ld a,1
+    ld (crashed),a
+    ret
+
+mark_fuel_hud_dirty:
+    ld a,(hud_dirty)
+    or 4
+    ld (hud_dirty),a
+    ret
+
 update_tank:
+    ; The ordinary shore gun has its own actor slot. Bridge creation no longer
+    ; steals these coordinates or interrupts a shell already in flight.
+    jp update_shore_tank
+
+update_bridge_tank:
+    ; Modes 1/2 are crossing and waiting/fire. Modes 3/4 are the corresponding
+    ; states waiting above the HUD until the bridge reaches visible rows.
+    ld a,(bridge_tank_mode)
+    cp 3
+    jr nc,activate_waiting_bridge_tank
+    or a
+    ret z
+
+    ld a,(bridge_tank_active)
+    or a
+    ret z
+    call scroll_bridge_tank_down
+    or a
+    ret z
+    ld a,(bridge_tank_mode)
+    cp 2
+    jp z,maybe_fire_bridge_tank
+    jp drive_tank_across_bridge
+
+activate_waiting_bridge_tank:
+    ld a,(bridge_active)
+    or a
+    jr z,cancel_waiting_bridge_tank
+    ld a,(bridge_y)
+    cp 5                            ; tank Y=bridge Y+3 must not enter the HUD
+    ret c
+    ld a,(bridge_tank_mode)
+    sub 2
+    ld (bridge_tank_mode),a
+    ld a,1
+    ld (bridge_tank_active),a
+    ld a,(bridge_y)
+    add a,3
+    ld (bridge_tank_y),a
+    ld a,12
+    ld (bridge_tank_fire_timer),a
+
+    ld a,(bridge_tank_mode)
+    cp 1
+    jr nz,place_waiting_bridge_tank
+
+    ; A crossing tank enters from the physical screen edge, not from the river
+    ; bank. The complete white approach road is therefore part of its journey.
+    ld a,1
+    ld (bridge_tank_move_phase),a    ; first base-speed step is one pixel
+    ld a,(bridge_tank_side)
+    or a
+    jr nz,start_crossing_tank_on_right
+    xor a
+    ld (bridge_tank_x),a
+    ret
+start_crossing_tank_on_right:
+    ld a,240                        ; 16px hull exactly touches right edge
+    ld (bridge_tank_x),a
+    ret
+
+place_waiting_bridge_tank:
+    ld a,(bridge_tank_side)
+    or a
+    jr nz,place_waiting_tank_on_right
+    ld a,(bridge_col)
+    cp 2
+    jr nc,bridge_tank_left_has_room
+    xor a
+    jr store_bridge_tank_col
+bridge_tank_left_has_room:
+    sub 2
+    jr store_bridge_tank_col
+place_waiting_tank_on_right:
+    ld a,(bridge_col)
+    ld b,a
+    ld a,(bridge_width)
+    add a,b
+    cp 31
+    jr c,store_bridge_tank_col
+    ld a,30
+store_bridge_tank_col:
+    add a,a
+    add a,a
+    add a,a
+    ld (bridge_tank_x),a
+    ret
+
+cancel_waiting_bridge_tank:
+    xor a
+    ld (bridge_tank_mode),a
+    ld (bridge_tank_active),a
+    ret
+
+scroll_bridge_tank_down:
+    ; Keep exactly the same world-line offset as the scrolling bridge.
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(bridge_tank_y)
+    add a,b
+    cp 184
+    jr c,store_bridge_tank_y
+    xor a
+    ld (bridge_tank_active),a
+    ld (bridge_tank_mode),a
+    ret
+store_bridge_tank_y:
+    ld (bridge_tank_y),a
+    ld a,1
+    ret
+
+drive_tank_across_bridge:
+    ; Traverse the complete road from one screen edge to the other. At base
+    ; alternating 1/2-pixel steps average 1.5 px/frame, slightly slower than
+    ; the former fixed 2 px. This is the tank's own speed and is deliberately
+    ; independent of the player's Q/A scroll modifier.
+    ld a,(bridge_tank_side)
+    or a
+    jr nz,drive_bridge_tank_left
+
+    ld a,(bridge_tank_x)
+    cp 240
+    jr nc,bridge_tank_finished_road
+    ld c,a
+    call get_bridge_tank_horizontal_step
+    ld b,a
+    ld a,c
+    add a,b
+    cp 241
+    jr c,store_bridge_tank_right_x
+    ld a,240
+store_bridge_tank_right_x:
+    ld (bridge_tank_x),a
+    ret
+
+drive_bridge_tank_left:
+    ld a,(bridge_tank_x)
+    or a
+    jr z,bridge_tank_finished_road
+    ld c,a
+    call get_bridge_tank_horizontal_step
+    ld b,a
+    ld a,c
+    cp b
+    jr nc,subtract_bridge_tank_left_step
+    xor a
+    jr store_bridge_tank_left_x
+subtract_bridge_tank_left_step:
+    sub b
+store_bridge_tank_left_x:
+    ld (bridge_tank_x),a
+    ret
+
+get_bridge_tank_horizontal_step:
+    ; Return alternating 1/2 regardless of course speed. Q/A changes how fast
+    ; the world approaches the player, never an actor's sideways motor speed.
+    ld a,(bridge_tank_move_phase)
+    xor 1
+    ld (bridge_tank_move_phase),a
+    inc a
+    ret
+
+bridge_tank_finished_road:
+    xor a
+    ld (bridge_tank_active),a
+    ld (bridge_tank_mode),a
+    ret
+
+update_shore_tank:
+    ; A live shore tank follows its bank down the screen and counts down to a
+    ; shot. The shell may outlive the firing tank after it leaves the screen.
     ld a,(tank_active)
     or a
     jr z,wait_for_tank
+    call scroll_tank_down
+    or a
+    ret z
+    jp maybe_fire_tank
+
+scroll_tank_down:
+    ; Return A=1 while the tank remains in the 176-line playfield, else zero.
     ld a,(speed_pixels)
     ld b,a
     ld a,(tank_y)
     add a,b
-    cp 192
+    cp 184
     jr c,store_tank_y
     xor a
     ld (tank_active),a
     ld a,72
     ld (tank_delay),a
+    xor a
     ret
 store_tank_y:
     ld (tank_y),a
+    ld a,1
     ret
 wait_for_tank:
     ld a,(tank_delay)
@@ -1847,16 +3327,202 @@ wait_for_tank:
     ld (tank_delay),a
     ret
 spawn_tank:
+    xor a
     ld a,1
     ld (tank_active),a
-    xor a
+    ld a,8
     ld (tank_y),a
     ld a,(tank_side)
     xor 1
     ld (tank_side),a
-    xor a
+    ld a,8
     call calc_tank_col
     ld (tank_col),a
+    add a,a
+    add a,a
+    add a,a
+    ld (tank_x),a
+    ld a,72
+    ld (tank_fire_timer),a
+    ret
+
+maybe_fire_bridge_tank:
+    ld a,(bridge_tank_fire_timer)
+    or a
+    jr z,bridge_tank_fire_timer_elapsed
+    dec a
+    ld (bridge_tank_fire_timer),a
+    ret
+bridge_tank_fire_timer_elapsed:
+    ld a,(tank_shell_active)
+    or a
+    ret nz
+    ld a,48
+    ld (bridge_tank_fire_timer),a
+    ld a,(bridge_tank_y)
+    ld (firing_tank_y),a
+    ld a,(bridge_tank_side)
+    ld (firing_tank_side),a
+    jr fire_selected_tank
+
+maybe_fire_tank:
+    ld a,(tank_fire_timer)
+    or a
+    jr z,tank_fire_timer_elapsed
+    dec a
+    ld (tank_fire_timer),a
+    ret
+tank_fire_timer_elapsed:
+    ; A single shell may exist at once. Leave an elapsed timer at zero while
+    ; that shell is active; if the tank is still visible when it disappears,
+    ; the next shot can begin immediately instead of losing a firing cycle.
+    ld a,(tank_shell_active)
+    or a
+    ret nz
+    ld a,96
+    ld (tank_fire_timer),a
+    ld a,(tank_y)
+    ld (firing_tank_y),a
+    ld a,(tank_side)
+    ld (firing_tank_side),a
+
+fire_selected_tank:
+    call start_tank_shot_sound
+    ld a,(firing_tank_y)
+    add a,4
+    ld (tank_shell_y),a
+    ld a,(firing_tank_y)
+    call get_bounds_for_y
+    ld a,(firing_tank_side)
+    or a
+    jr nz,fire_tank_from_right_bank
+
+    ; D is the last left-bank byte. Start in the first complete water byte
+    ; and travel toward the centre of the river.
+    ld a,d
+    inc a
+    add a,a
+    add a,a
+    add a,a
+    ld (tank_shell_x),a
+    ld a,1
+    ld (tank_shell_dir),a
+    jr activate_tank_shell
+fire_tank_from_right_bank:
+    ; E is the right-bank edge. A two-pixel shell begins immediately before
+    ; it and travels left, again entering water rather than crossing land.
+    ld a,e
+    add a,a
+    add a,a
+    add a,a
+    sub 2
+    ld (tank_shell_x),a
+    ld a,255
+    ld (tank_shell_dir),a
+activate_tank_shell:
+    ; Aim at the player's current centre, clamped to the adjacent navigable
+    ; branch. The shot therefore visibly tracks the jet but still has a finite
+    ; water landing point, even when an island splits the river.
+    ld c,0
+    ld a,(firing_tank_side)
+    or a
+    jr z,tank_shell_lane_selected
+    dec c                            ; 255 selects the right fork branch
+tank_shell_lane_selected:
+    ld a,(firing_tank_y)
+    add a,4
+    call get_pixel_lane_bounds
+    ld a,(player_x)
+    add a,8
+    ld b,a
+    ld a,d
+    add a,8
+    cp b
+    jr c,tank_target_above_minimum
+    jr z,tank_target_above_minimum
+    ld b,a
+tank_target_above_minimum:
+    ld a,e
+    add a,8
+    cp b
+    jr nc,tank_target_below_maximum
+    ld b,a
+tank_target_below_maximum:
+    ld a,b
+    ld (tank_shell_target_x),a
+    ld a,1
+    ld (tank_shell_active),a
+    ret
+
+update_tank_shell:
+    ld a,(tank_shell_active)
+    or a
+    ret z
+    cp 2
+    jr z,update_tank_splash
+
+    ; The shell stays on its world scanline while the scenery scrolls. Its
+    ; independent horizontal component is four real pixels per frame. The gun
+    ; fires less often, but each shell becomes an immediate, sharper threat.
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(tank_shell_y)
+    add a,b
+    cp 184
+    jr nc,remove_tank_shell
+    ld (tank_shell_y),a
+
+    ld a,(tank_shell_dir)
+    cp 255
+    jr z,move_tank_shell_left
+    ld a,(tank_shell_x)
+    add a,4
+    jr c,remove_tank_shell
+    ld (tank_shell_x),a
+    ld b,a
+    ld a,(tank_shell_target_x)
+    cp b
+    jr c,land_tank_shell
+    jr z,land_tank_shell
+    ret
+move_tank_shell_left:
+    ld a,(tank_shell_x)
+    cp 4
+    jr c,remove_tank_shell
+    sub 4
+    ld (tank_shell_x),a
+    ld b,a
+    ld a,(tank_shell_target_x)
+    cp b
+    jr nc,land_tank_shell
+    ret
+
+land_tank_shell:
+    ld a,(tank_shell_target_x)
+    ld (tank_shell_x),a
+    call start_ay_splash
+    ld a,10
+    ld (tank_splash_timer),a
+    ld a,2
+    ld (tank_shell_active),a
+    ret
+
+update_tank_splash:
+    ; The splash belongs to the same world line as the water beneath it.
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(tank_shell_y)
+    add a,b
+    cp 184
+    jr nc,remove_tank_shell
+    ld (tank_shell_y),a
+    ld a,(tank_splash_timer)
+    dec a
+    ld (tank_splash_timer),a
+    ret nz
+remove_tank_shell:
+    xor a
+    ld (tank_shell_active),a
     ret
 
 calc_tank_col:
@@ -1882,6 +3548,7 @@ tank_on_right:
     ret
 
 update_bridge:
+    call update_destroyed_road
     ld a,(bridge_spawn_pending)
     or a
     jr z,advance_active_bridge
@@ -1890,6 +3557,7 @@ update_bridge:
     ld a,1
     ld (bridge_active),a
     xor a
+    ld (destroyed_road_active),a
     ld (bridge_y),a
     call get_bounds_for_y
     ld a,d
@@ -1899,12 +3567,35 @@ update_bridge:
     sub b
     inc a
     ld (bridge_width),a
+    call setup_bridge_tank
     ld b,16
     ld c,255
     xor a
     call bridge_fill_rows
-    ld c,0x0a
-    call bridge_paint_attributes
+    call bridge_paint_road_attributes
+    call bridge_draw_initial_road_markings
+    ret
+
+setup_bridge_tank:
+    ; Every bridge owns a second tank actor. Behaviours alternate so a crossing
+    ; is guaranteed to be seen: pending mode 3 crosses, mode 4 waits and fires.
+    xor a
+    ld (bridge_tank_active),a
+    ld a,(bridge_tank_side)
+    xor 1
+    ld (bridge_tank_side),a
+    ld a,(bridge_tank_next_mode)
+    or a
+    jr nz,setup_waiting_bridge_tank
+    ld a,3
+    jr store_pending_bridge_tank_mode
+setup_waiting_bridge_tank:
+    ld a,4
+store_pending_bridge_tank_mode:
+    ld (bridge_tank_mode),a
+    ld a,(bridge_tank_next_mode)
+    xor 1
+    ld (bridge_tank_next_mode),a
     ret
 advance_active_bridge:
     ld a,(bridge_active)
@@ -1913,6 +3604,10 @@ advance_active_bridge:
     ld a,(speed_pixels)
     or a
     ret z
+
+    ; The dashed centre consists of two scanlines. Restore only the one or two
+    ; rows that cease to be its centre before moving the bridge envelope.
+    call bridge_restore_departing_road_markings
 
     ; Remove only the rows which leave the top. Clearing the broad band is
     ; followed by an exact bank/island reconstruction for those scanlines.
@@ -1929,7 +3624,7 @@ bridge_restore_top:
     or a
     jr z,bridge_top_restored
     ld a,(bridge_restore_y)
-    cp 192
+    cp 184
     jr nc,bridge_top_restored
     ld (dirty_y),a
     call render_v3_row
@@ -1946,13 +3641,14 @@ bridge_top_restored:
     ld b,a
     ld a,(bridge_y)
     add a,b
-    cp 192
+    cp 184
     jr c,store_bridge_y
     ; No new bridge span remains on screen, so clear its last colour cells.
-    ld c,0x4c
-    call bridge_paint_attributes
+    call bridge_clear_road_attributes
     xor a
     ld (bridge_active),a
+    ld (bridge_tank_mode),a
+    ld (bridge_tank_active),a
     ret
 store_bridge_y:
     ld (bridge_y),a
@@ -1973,7 +3669,249 @@ store_bridge_y:
     ; Repaint the ends which may have been touched by this frame's bank pass.
     ld a,(bridge_y)
     call bridge_refresh_edges
+    call bridge_draw_entering_road_markings
+    ld a,0x0a
+    ld (bridge_center_attr),a
     call bridge_update_attributes
+    ret
+
+bridge_draw_initial_road_markings:
+    ld a,(bridge_y)
+    add a,7
+    call bridge_draw_road_marking_row
+    ld a,(bridge_y)
+    add a,8
+    jp bridge_draw_road_marking_row
+
+update_destroyed_road:
+    ; After the span is blown away, both white approaches remain part of the
+    ; world and keep scrolling. Only their two dashed centre scanlines require
+    ; bitmap work; the remainder is ordinary bank data under white attributes.
+    ld a,(destroyed_road_active)
+    or a
+    ret z
+    ld a,(speed_pixels)
+    or a
+    ret z
+
+    ld b,a
+    ld a,(bridge_y)
+    add a,7
+    ld (road_mark_y),a
+    ld a,b
+    ld (road_mark_rows),a
+destroyed_road_restore_loop:
+    ld a,(road_mark_y)
+    cp 184
+    jr nc,destroyed_road_restore_next
+    ld c,0
+    call bridge_fill_full_bitmap_row
+    ld a,(road_mark_y)
+    call render_full_world_row
+destroyed_road_restore_next:
+    ld a,(road_mark_y)
+    inc a
+    ld (road_mark_y),a
+    ld a,(road_mark_rows)
+    dec a
+    ld (road_mark_rows),a
+    jr nz,destroyed_road_restore_loop
+
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(bridge_y)
+    add a,b
+    ld (bridge_y),a
+
+    call bridge_draw_entering_destroyed_road_markings
+    ld a,0x4c
+    ld (bridge_center_attr),a
+    call bridge_update_attributes
+    ld a,(bridge_y)
+    cp 184
+    ret c
+    xor a
+    ld (destroyed_road_active),a
+    ret
+
+bridge_draw_destroyed_road_markings:
+    ld a,(bridge_y)
+    add a,7
+    call bridge_draw_destroyed_road_marking_row
+    ld a,(bridge_y)
+    add a,8
+    jp bridge_draw_destroyed_road_marking_row
+
+bridge_draw_entering_destroyed_road_markings:
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(bridge_y)
+    add a,9
+    sub b
+    ld (road_mark_y),a
+    ld a,b
+    ld (road_mark_rows),a
+destroyed_road_draw_loop:
+    ld a,(road_mark_y)
+    call bridge_draw_destroyed_road_marking_row
+    ld a,(road_mark_y)
+    inc a
+    ld (road_mark_y),a
+    ld a,(road_mark_rows)
+    dec a
+    ld (road_mark_rows),a
+    jr nz,destroyed_road_draw_loop
+    ret
+
+bridge_draw_destroyed_road_marking_row:
+    ; Input A=Y. Draw alternating black gaps only over the two land approaches;
+    ; the former bridge span stays untouched blue water.
+    cp 8
+    ret c
+    cp 184
+    ret nc
+    call calc_screen_line_addr
+    ld c,0
+    ld a,(bridge_col)
+    ld b,a
+    call bridge_draw_road_segment
+
+    ld a,(bridge_width)
+    add a,l
+    ld l,a
+    ld a,(bridge_col)
+    ld c,a
+    ld a,(bridge_width)
+    add a,c
+    ld c,a
+    ld b,a
+    ld a,32
+    sub b
+    ld b,a
+    jp bridge_draw_road_segment
+
+bridge_draw_road_segment:
+    ; Input HL=first byte, B=count, C=absolute byte column.
+    ld a,b
+    or a
+    ret z
+bridge_draw_road_segment_byte:
+    ld a,c
+    and 1
+    jr z,bridge_draw_road_segment_white
+    xor a
+    jr bridge_store_road_segment_byte
+bridge_draw_road_segment_white:
+    ld a,255
+bridge_store_road_segment_byte:
+    ld (hl),a
+    inc l
+    inc c
+    djnz bridge_draw_road_segment_byte
+    ret
+
+bridge_restore_departing_road_markings:
+    ld a,(bridge_y)
+    add a,7
+    ld (road_mark_y),a
+    ld a,(speed_pixels)
+    ld (road_mark_rows),a
+bridge_restore_road_row:
+    ld a,(road_mark_y)
+    call bridge_erase_road_marking_row
+    ld a,(road_mark_y)
+    inc a
+    ld (road_mark_y),a
+    ld a,(road_mark_rows)
+    dec a
+    ld (road_mark_rows),a
+    jr nz,bridge_restore_road_row
+    ret
+
+bridge_erase_road_marking_row:
+    ; Gap bytes are already 0xff. Only the sixteen former black dash bytes
+    ; need restoring, halving writes on the bridge's hot scrolling path.
+    cp 8
+    ret c
+    cp 184
+    ret nc
+    call calc_screen_line_addr
+    inc l
+    ld b,16
+bridge_erase_road_dash:
+    ld (hl),255
+    inc l
+    inc l
+    djnz bridge_erase_road_dash
+    ret
+
+bridge_draw_entering_road_markings:
+    ; New centre starts at bridge_y+9-speed: +8 at 1 px, +7 at 2 px.
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(bridge_y)
+    add a,9
+    sub b
+    ld (road_mark_y),a
+    ld a,b
+    ld (road_mark_rows),a
+bridge_draw_entering_road_row:
+    ld a,(road_mark_y)
+    call bridge_draw_road_marking_row
+    ld a,(road_mark_y)
+    inc a
+    ld (road_mark_y),a
+    ld a,(road_mark_rows)
+    dec a
+    ld (road_mark_rows),a
+    jr nz,bridge_draw_entering_road_row
+    ret
+
+bridge_fill_full_bitmap_row:
+    ; Input A=Y, C=byte. Road rows are inside a bridge band, so land plus
+    ; bridge makes the complete 256-pixel scanline solid before dash cutting.
+    cp 8
+    ret c
+    cp 184
+    ret nc
+    call calc_screen_line_addr
+    ld b,4
+    ld a,c
+bridge_full_bitmap_byte:
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    ld (hl),a
+    inc l
+    djnz bridge_full_bitmap_byte
+    ret
+
+bridge_draw_road_marking_row:
+    ; Input A=Y. The intact bridge/road row is already solid 0xff, so write
+    ; only the sixteen black dash bytes instead of redundantly storing all 32.
+    cp 8
+    ret c
+    cp 184
+    ret nc
+    call calc_screen_line_addr
+    inc l
+    ld b,16
+bridge_road_dash_byte:
+    ld (hl),0
+    inc l
+    inc l
+    djnz bridge_road_dash_byte
     ret
 
 update_bullet:
@@ -1990,7 +3928,8 @@ update_existing_bullet:
     or a
     ret z
     ld a,(bullet_y)
-    cp 6
+    ; The projectile may reach Y=8, but never enters the HUD at Y=0..7.
+    cp 14
     jr nc,move_bullet_up
     xor a
     ld (bullet_active),a
@@ -1999,21 +3938,41 @@ move_bullet_up:
     sub 6
     ld (bullet_y),a
 
-    ; Only the bridge is destructible in this renderer pass.
+    ; Test the swept 10-line interval (6 pixels of travel plus the 4-pixel
+    ; projectile) so a fast bullet cannot tunnel through an eight-line ship.
+    call bullet_hits_fuel
+    or a
+    ret nz
+    call bullet_hits_ship0
+    or a
+    ret nz
+    call bullet_hits_ship1
+    or a
+    ret nz
+    call bullet_hits_helicopter
+    or a
+    ret nz
+    call bullet_hits_enemy_plane
+    or a
+    ret nz
+
+    ; Actor sprites are absent from the bitmap during collision, so the
+    ; crossing aircraft is tested explicitly above. Bridge geometry is also
+    ; explicit because a background hit on it must award points and destroy it.
     ld a,(bridge_active)
     or a
-    ret z
+    jp z,bullet_checks_destroyed_road
     ld a,(bullet_y)
-    add a,4
+    add a,10                        ; swept projectile bottom
     ld b,a
     ld a,(bridge_y)
     cp b
-    ret nc
+    jp nc,bullet_hits_background
     add a,16
     ld b,a
     ld a,(bullet_y)
     cp b
-    ret nc
+    jp nc,bullet_hits_background
 
     ld a,(bridge_col)
     add a,a
@@ -2023,7 +3982,7 @@ move_bullet_up:
     ld a,(bullet_x)
     add a,8
     cp b
-    ret c
+    jp c,bullet_background_collision ; white road left of the bridge span
     ld a,(bridge_col)
     ld b,a
     ld a,(bridge_width)
@@ -2035,33 +3994,363 @@ move_bullet_up:
     ld a,(bullet_x)
     add a,7
     cp b
-    ret nc
+    jp nc,bullet_background_collision ; white road right of the bridge span
 
     call destroy_bridge
     xor a
     ld (bullet_active),a
     ret
 
+bullet_checks_destroyed_road:
+    ; White approaches keep scrolling after the bridge span is gone. Their
+    ; black dashed pixels are zero bits but not blue water, so geometry must
+    ; reject a projectile there before the normal bitmap-only test.
+    ld a,(destroyed_road_active)
+    or a
+    jp z,bullet_hits_background
+    ld a,(bullet_y)
+    add a,10
+    ld b,a
+    ld a,(bridge_y)
+    cp b
+    jp nc,bullet_hits_background
+    add a,16
+    ld b,a
+    ld a,(bullet_y)
+    cp b
+    jp nc,bullet_hits_background
+
+    ld a,(bridge_col)
+    add a,a
+    add a,a
+    add a,a
+    ld b,a
+    ld a,(bullet_x)
+    add a,8
+    cp b
+    jp c,bullet_background_collision
+    ld a,(bridge_col)
+    ld b,a
+    ld a,(bridge_width)
+    add a,b
+    add a,a
+    add a,a
+    add a,a
+    ld b,a
+    ld a,(bullet_x)
+    add a,7
+    cp b
+    jp nc,bullet_background_collision
+    jp bullet_hits_background
+
+bullet_hits_background:
+    ; The two solid pixels must remain over zero bitmap bits (blue water) for
+    ; the whole swept ten-line interval. A bank, island, road or other solid
+    ; scenery bit consumes the shot. Moving actors are handled before this
+    ; test because their XOR images have deliberately been erased.
+    ld a,(bullet_x)
+    add a,7
+    ld c,a
+    and 7
+    add a,a
+    ld e,a
+    ld d,0
+    ld hl,projectile_mask_table
+    add hl,de
+    ld a,(hl)
+    ld (bullet_background_mask_0),a
+    inc hl
+    ld a,(hl)
+    ld (bullet_background_mask_1),a
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld (bullet_background_col),a
+    ld a,(bullet_y)
+    ld (bullet_background_y),a
+    ld a,10
+    ld (bullet_background_rows),a
+bullet_background_row:
+    ld a,(bullet_background_y)
+    cp 184
+    jr nc,bullet_background_collision
+    call calc_screen_line_addr
+    ld a,(bullet_background_col)
+    add a,l
+    ld l,a
+    ld a,(bullet_background_mask_0)
+    and (hl)
+    jr nz,bullet_background_collision
+    inc l
+    ld a,(bullet_background_mask_1)
+    and (hl)
+    jr nz,bullet_background_collision
+    ld a,(bullet_background_y)
+    inc a
+    ld (bullet_background_y),a
+    ld a,(bullet_background_rows)
+    dec a
+    ld (bullet_background_rows),a
+    jr nz,bullet_background_row
+    ret
+bullet_background_collision:
+    xor a
+    ld (bullet_active),a
+    ret
+
+bullet_hits_fuel:
+    ld a,(fuel_active)
+    or a
+    ret z
+    ld a,(fuel_x)
+    ld c,a
+    ld e,8
+    ld a,(fuel_y)
+    ld b,32
+    call bullet_hits_actor
+    or a
+    ret z
+    ld a,(fuel_y)
+    ld b,a
+    ld a,(fuel_x)
+    call start_hit_explosion
+    xor a
+    ld (bullet_active),a
+    ld (fuel_active),a
+    ld a,96
+    ld (fuel_delay),a
+    call add_score_100
+    ld a,1
+    ret
+
+bullet_hits_ship0:
+    ld a,(ship0_active)
+    or a
+    ret z
+    ld a,(ship0_x)
+    ld c,a
+    ld e,32
+    ld a,(ship0_y)
+    ld b,8
+    call bullet_hits_actor
+    or a
+    ret z
+    ld a,(ship0_y)
+    ld b,a
+    ld a,(ship0_x)
+    add a,8                         ; centre 16-pixel blast on 32-pixel hull
+    call start_hit_explosion
+    xor a
+    ld (bullet_active),a
+    ld (ship0_active),a
+    ld a,160
+    ld (ship0_delay),a
+    call add_score_100
+    ld a,1
+    ret
+
+bullet_hits_ship1:
+    ld a,(ship1_active)
+    or a
+    ret z
+    ld a,(ship1_x)
+    ld c,a
+    ld e,32
+    ld a,(ship1_y)
+    ld b,8
+    call bullet_hits_actor
+    or a
+    ret z
+    ld a,(ship1_y)
+    ld b,a
+    ld a,(ship1_x)
+    add a,8
+    call start_hit_explosion
+    xor a
+    ld (bullet_active),a
+    ld (ship1_active),a
+    ld a,160
+    ld (ship1_delay),a
+    call add_score_100
+    ld a,1
+    ret
+
+bullet_hits_actor:
+    ; Input A=target Y, B=height, C=target X, E=width. The bullet's two solid
+    ; centre pixels are represented by X+8; its vertical interval includes
+    ; both the previous and new positions to prevent high-speed tunnelling.
+    ld d,a
+    add a,b
+    ld b,a
+    ld a,(bullet_y)
+    cp b
+    jr nc,bullet_missed_actor
+    add a,10
+    ld b,a
+    ld a,d
+    cp b
+    jr nc,bullet_missed_actor
+
+    ld a,(bullet_x)
+    add a,8
+    ld d,a
+    ld a,c
+    cp d
+    jr z,bullet_actor_left_ok
+    jr nc,bullet_missed_actor
+bullet_actor_left_ok:
+    ld a,c
+    add a,e
+    cp d
+    jr c,bullet_missed_actor
+    jr z,bullet_missed_actor
+    ld a,1
+    ret
+bullet_missed_actor:
+    xor a
+    ret
+
+bullet_hits_helicopter:
+    ld a,(helicopter_active)
+    or a
+    ret z
+    ld a,(bullet_y)
+    ld d,a
+    ld a,(helicopter_y)
+    add a,10
+    cp d
+    jr c,bullet_missed_helicopter
+    jr z,bullet_missed_helicopter
+    ld a,d
+    add a,10
+    ld d,a
+    ld a,(helicopter_y)
+    cp d
+    jr nc,bullet_missed_helicopter
+
+    ; Only the two central set pixels of the 16-pixel bullet are solid.
+    ld a,(bullet_x)
+    add a,8
+    ld d,a
+    ld a,(helicopter_x)
+    cp d
+    jr c,bullet_right_of_helicopter_left
+    jr z,bullet_right_of_helicopter_left
+    jr bullet_missed_helicopter
+bullet_right_of_helicopter_left:
+    ld a,(helicopter_x)
+    add a,16
+    cp d
+    jr c,bullet_missed_helicopter
+    jr z,bullet_missed_helicopter
+
+    ld a,(helicopter_y)
+    ld b,a
+    ld a,(helicopter_x)
+    call start_hit_explosion
+    xor a
+    ld (bullet_active),a
+    ld (helicopter_active),a
+    ld a,160
+    ld (helicopter_delay),a
+    call add_score_100
+    ld a,1
+    ret
+bullet_missed_helicopter:
+    xor a
+    ret
+
+bullet_hits_enemy_plane:
+    ; The plane is allowed over land, so water-only projectile testing cannot
+    ; stand in for a sprite collision. A forgiving 16x8 box makes the fast,
+    ; three-pixel crossing target practical to hit.
+    ld a,(enemy_plane_active)
+    or a
+    ret z
+    ld a,(enemy_plane_x)
+    ld c,a
+    ld e,16
+    ld a,(enemy_plane_y)
+    ld b,8
+    call bullet_hits_actor
+    or a
+    ret z
+    ld a,(enemy_plane_y)
+    ld b,a
+    ld a,(enemy_plane_x)
+    call start_hit_explosion
+    xor a
+    ld (bullet_active),a
+    ld (enemy_plane_active),a       ; one crossing aircraft per scene/life
+    call add_score_100
+    ld a,1
+    ret
+
+add_score_100:
+    ; Six display digits are kept directly as ASCII. Enemy values are fixed
+    ; multiples of 100, so carrying from the hundreds column is much cheaper
+    ; than converting a binary score through division every HUD update.
+    ld hl,score_digit_3
+    ld b,4
+add_score_100_digit:
+    ld a,(hl)
+    inc a
+    cp 58
+    jr c,store_score_digit
+    ld (hl),48
+    dec hl
+    djnz add_score_100_digit
+    ld c,4
+    jr score_changed
+store_score_digit:
+    ld (hl),a
+    ld a,5
+    sub b
+    ld c,a                          ; number of right-aligned changed digits
+score_changed:
+    ld a,(score_redraw_count)
+    cp c
+    jr nc,score_redraw_count_ready
+    ld a,c
+    ld (score_redraw_count),a
+score_redraw_count_ready:
+    ld a,(hud_dirty)
+    or 2
+    ld (hud_dirty),a
+    ret
+
 destroy_bridge:
-    ld c,0x4c
-    call bridge_paint_attributes
+    ; A bridge is worth 200 points. Only a crossing tank whose hull actually
+    ; overlaps the centre span is destroyed for the 500-point combined hit.
+    ; A waiting/firing tank belongs to the road approach and survives.
+    ld a,(bridge_y)
+    add a,2
+    ld b,a
+    ld a,(bullet_x)
+    call start_hit_explosion          ; bitmap burst plus channel-C explosion
+    call add_score_100
+    call add_score_100
+    call destroy_bridge_tank_bonus
+    call bridge_paint_destroyed_road_attributes
     ld a,(bridge_y)
     ld (bridge_restore_y),a
     ld a,16
     ld (bridge_restore_rows),a
-    ld b,a
-    ld c,0
-    ld a,(bridge_y)
-    call bridge_fill_rows
 destroy_bridge_restore:
     ld a,(bridge_restore_rows)
     or a
     jr z,destroy_bridge_done
     ld a,(bridge_restore_y)
-    cp 192
+    cp 184
     jr nc,destroy_bridge_done
-    ld (dirty_y),a
-    call render_v3_row
+    ; render_v3_row normally assumes that all bank interiors are already set.
+    ; Road dashes violate that invariant, so clear the complete scanline and
+    ; use the deliberately slower full-row world reconstruction here.
+    ld c,0
+    call bridge_fill_full_bitmap_row
+    ld a,(bridge_restore_y)
+    call render_full_world_row
     ld a,(bridge_restore_y)
     inc a
     ld (bridge_restore_y),a
@@ -2072,17 +4361,91 @@ destroy_bridge_restore:
 destroy_bridge_done:
     xor a
     ld (bridge_active),a
+    ld a,1
+    ld (destroyed_road_active),a
+    call preserve_road_tank_after_bridge
+    call bridge_draw_destroyed_road_markings
     ret
 
+preserve_road_tank_after_bridge:
+    ; destroy_bridge_tank_bonus has already removed a mode-1 tank if it was on
+    ; the span. A crossing tank still on an approach stops there and becomes a
+    ; firing road tank; an existing mode-2 firing tank is left untouched.
+    ld a,(bridge_tank_active)
+    or a
+    jr z,cancel_pending_destroyed_bridge_tank
+    ld a,(bridge_tank_mode)
+    cp 1
+    ret nz
+    ld a,2
+    ld (bridge_tank_mode),a
+    ld a,12
+    ld (bridge_tank_fire_timer),a
+    ret
+cancel_pending_destroyed_bridge_tank:
+    ; Modes 3/4 have not reached the visible road yet and must not materialise
+    ; after their bridge has disappeared.
+    xor a
+    ld (bridge_tank_mode),a
+    ret
+
+destroy_bridge_tank_bonus:
+    ld a,(bridge_tank_active)
+    or a
+    ret z
+    ld a,(bridge_tank_mode)
+    cp 1
+    ret nz
+
+    ; Half-open pixel intervals: tank [x,x+16), bridge
+    ; [bridge_col*8,(bridge_col+width)*8). Y is locked to the road.
+    ld a,(bridge_tank_x)
+    add a,16
+    ld b,a
+    ld a,(bridge_col)
+    add a,a
+    add a,a
+    add a,a
+    cp b
+    ret nc
+    ld a,(bridge_col)
+    ld b,a
+    ld a,(bridge_width)
+    add a,b
+    add a,a
+    add a,a
+    add a,a
+    ld b,a
+    ld a,(bridge_tank_x)
+    cp b
+    ret nc
+
+    xor a
+    ld (bridge_tank_active),a
+    ld (bridge_tank_mode),a
+    call add_score_100
+    call add_score_100
+    jp add_score_100
+
 object_overlaps_bridge:
-    ; Input A=object Y, B=height. Return A=1 when vertical intervals overlap.
+    ; Input A=object Y, B=height. The forbidden vertical interval extends
+    ; eight pixels above and below the 16-line bridge. This visual clearance
+    ; prevents a hull from appearing to scrape a bridge without overlapping.
     ld c,a
     add a,b
     ld d,a
     ld a,(bridge_y)
+    cp 8
+    jr nc,bridge_lower_bound_on_screen
+    xor a
+    jr bridge_lower_bound_ready
+bridge_lower_bound_on_screen:
+    sub 8
+bridge_lower_bound_ready:
     cp d
     jr nc,object_misses_bridge
-    add a,16
+    ld a,(bridge_y)
+    add a,24
     ld d,a
     ld a,c
     cp d
@@ -2099,6 +4462,9 @@ keep_water_objects_off_bridge:
     ld a,(bridge_active)
     or a
     ret z
+    ld a,(ship0_active)
+    or a
+    jr z,check_ship1_bridge
     ld a,(ship0_y)
     ld b,8
     call object_overlaps_bridge
@@ -2106,6 +4472,9 @@ keep_water_objects_off_bridge:
     jr z,check_ship1_bridge
     call relocate_ship0
 check_ship1_bridge:
+    ld a,(ship1_active)
+    or a
+    jr z,check_helicopter_bridge
     ld a,(ship1_y)
     ld b,8
     call object_overlaps_bridge
@@ -2113,54 +4482,90 @@ check_ship1_bridge:
     jr z,check_helicopter_bridge
     call relocate_ship1
 check_helicopter_bridge:
+    ld a,(helicopter_active)
+    or a
+    jr z,check_fuel_bridge
     ld a,(helicopter_y)
     ld b,10
     call object_overlaps_bridge
     or a
-    ret z
+    jr z,check_fuel_bridge
     call relocate_helicopter
+check_fuel_bridge:
+    ld a,(fuel_active)
+    or a
+    ret z
+    ld a,(fuel_y)
+    ld b,32
+    call object_overlaps_bridge
+    or a
+    ret z
+    call relocate_fuel
     ret
 
 relocate_ship0:
     ld a,(bridge_y)
-    cp 8
+    cp 24
     jr c,ship0_below_bridge
-    xor a
+    ld a,8
     jr store_relocated_ship0_y
 ship0_below_bridge:
-    add a,16
+    add a,24
 store_relocated_ship0_y:
+    ld b,8
+    call choose_bridge_safe_actor_y
     ld (ship0_y),a
-    call calc_safe_river_x
+    call calc_safe_river_x_wide
     ld (ship0_x),a
     ret
 
 relocate_ship1:
     ld a,(bridge_y)
-    cp 8
+    cp 24
     jr c,ship1_below_bridge
-    xor a
+    ld a,8
     jr store_relocated_ship1_y
 ship1_below_bridge:
-    add a,16
+    add a,24
 store_relocated_ship1_y:
+    ld b,8
+    call choose_bridge_safe_actor_y
     ld (ship1_y),a
-    call calc_safe_river_x
+    call calc_safe_river_x_wide
     ld (ship1_x),a
     ret
 
 relocate_helicopter:
     ld a,(bridge_y)
-    cp 10
+    cp 26
     jr c,helicopter_below_bridge
-    xor a
+    ld a,8
     jr store_relocated_helicopter_y
 helicopter_below_bridge:
-    add a,16
+    add a,24
 store_relocated_helicopter_y:
+    ld b,10
+    call choose_bridge_safe_actor_y
     ld (helicopter_y),a
     call calc_safe_river_x
     ld (helicopter_x),a
+    ret
+
+relocate_fuel:
+    ld a,(bridge_y)
+    cp 48                           ; 8px top + 32px depot + 8px clearance
+    jr c,fuel_below_bridge
+    ld a,8
+    jr store_relocated_fuel_y
+fuel_below_bridge:
+    add a,24
+store_relocated_fuel_y:
+    ld b,32
+    call choose_bridge_safe_actor_y
+    ld (fuel_y),a
+    call calc_safe_river_x
+    and 0xf8
+    ld (fuel_x),a
     ret
 
 check_player_collision:
@@ -2168,41 +4573,77 @@ check_player_collision:
     ; point all XOR sprites have been removed, so set background bits mean
     ; bank, island or an intact bridge and zero bits mean navigable water.
     call check_player_background_pixels
-    jr c,player_crashed
+    jp c,player_crashed
 
+    ; The shell uses the same forgiving 6x6 player core as moving enemies,
+    ; but its collision rectangle is the actual two-pixel projectile.
+    ld a,(tank_shell_active)
+    cp 1                            ; the harmless splash cannot kill the jet
+    jr nz,check_player_ship0
+    ld a,2
+    ld (object_collision_width),a
+    ld a,(tank_shell_x)
+    ld c,a
+    ld a,(tank_shell_y)
+    ld b,2
+    call player_overlaps_object
+    jp c,player_crashed
+
+check_player_ship0:
+    ld a,32
+    ld (object_collision_width),a
+    ld a,(ship0_active)
+    or a
+    jr z,check_player_ship1
     ld a,(ship0_x)
     ld c,a
     ld a,(ship0_y)
     ld b,8
     call player_overlaps_object
-    jr c,player_crashed
+    jp c,player_crashed
+check_player_ship1:
+    ld a,(ship1_active)
+    or a
+    jr z,check_player_enemy_plane
     ld a,(ship1_x)
     ld c,a
     ld a,(ship1_y)
     ld b,8
     call player_overlaps_object
-    jr c,player_crashed
+    jp c,player_crashed
+check_player_enemy_plane:
+    ld a,16
+    ld (object_collision_width),a
+    ld a,(enemy_plane_active)
+    or a
+    jr z,check_player_helicopter
     ld a,(enemy_plane_x)
     ld c,a
     ld a,(enemy_plane_y)
     ld b,8
     call player_overlaps_object
-    jr c,player_crashed
+    jp c,player_crashed
+check_player_helicopter:
+    ld a,(helicopter_active)
+    or a
+    jr z,check_player_bridge_tank
     ld a,(helicopter_x)
     ld c,a
     ld a,(helicopter_y)
     ld b,10
     call player_overlaps_object
-    jr c,player_crashed
-    ld a,(tank_active)
+    jp c,player_crashed
+check_player_bridge_tank:
+    ; The ordinary shore tank is deliberately absent here: it remains on
+    ; lethal land which the bitmap test above already rejects. Only its flying
+    ; shell can hit a player who stays over water. A bridge tank is different,
+    ; because its route may place it directly across the player's path.
+    ld a,(bridge_tank_active)
     or a
     ret z
-    ld a,(tank_col)
-    add a,a
-    add a,a
-    add a,a
+    ld a,(bridge_tank_x)
     ld c,a
-    ld a,(tank_y)
+    ld a,(bridge_tank_y)
     ld b,10
     call player_overlaps_object
     ret nc
@@ -2274,8 +4715,9 @@ player_background_hit:
     ret
 
 player_overlaps_object:
-    ; Input A=object Y, B=height, C=object pixel X. Use a forgiving 6x6 core
-    ; inside the player silhouette for sprite-to-sprite collisions.
+    ; Input A=object Y, B=height, C=object pixel X. object_collision_width is
+    ; 32 for ships and 16 for all other actors. The player's forgiving 6x6
+    ; central core avoids deaths caused by transparent wing corners.
     ld d,a
     add a,b
     ld e,a
@@ -2296,7 +4738,9 @@ player_overlaps_object:
     add a,6
     ld e,a
     ld a,c
-    add a,16
+    ld b,a
+    ld a,(object_collision_width)
+    add a,b
     cp d
     jr c,player_object_miss
     jr z,player_object_miss
@@ -2318,6 +4762,8 @@ player_object_miss:
 begin_crash:
     ld a,1
     ld (game_state),a
+    call silence_ay
+    call start_ay_explosion
     ld a,75
     ld (explosion_timer),a
     ld a,5
@@ -2325,20 +4771,27 @@ begin_crash:
     xor a
     ld (explosion_frame),a
     ld (bullet_active),a
+    ld (tank_shell_active),a
     ld (fire_pending),a
+    ld (hit_explosion_active),a
     ld a,(lives)
     or a
     ret z
     dec a
     ld (lives),a
+    ld a,(hud_dirty)
+    or 1
+    ld (hud_dirty),a
     ret
 
 crash_wait_frame:
     ; Freeze the river and all enemies for 75 display frames (1.5 seconds).
-    ; Only the three-frame explosion continues to animate.
+    ; Only the three-frame explosion and its short AY burst keep advancing.
+    call update_ay_explosion
     call profile_begin
     call restore_entities
     call restore_helicopter_attributes
+    call restore_fuel_attributes
 
     ld a,(explosion_timer)
     dec a
@@ -2361,6 +4814,7 @@ store_explosion_frame:
 
 draw_crash_wait_frame:
     call paint_helicopter_attributes
+    call paint_fuel_attributes
     call paint_crash_attributes
     call draw_entities
     call profile_end
@@ -2382,6 +4836,8 @@ show_game_over:
     ; so this works without BASIC channels or system-variable assumptions.
     xor a
     out (0xfe),a
+    call silence_ay
+    ld (hud_initialized),a         ; next new game must restore erased labels
     ld hl,0x4000
     ld (hl),a
     ld de,0x4001
@@ -2498,7 +4954,242 @@ draw_rom_character_row:
 
 
 ; ---------------------------------------------------------------------------
-; Keyboard and optional border profiling
+; AY-3-8912 sound (128K Spectrum or a 48K machine with an AY interface)
+; ---------------------------------------------------------------------------
+
+init_ay_sound:
+    ; Channel A is noise-only for the jet engine. Channel B is tone-only for
+    ; the missile sweep. Channel C provides a brief tone/noise impact burst.
+    ; Port writes are harmless on a stock 48K machine with no AY chip.
+    xor a
+    ld (shot_sound_timer),a
+    ld (explosion_sound_timer),a
+    ld (ding_sound_timer),a
+    ld a,255
+    ld (ay_last_speed),a
+    ld e,0x31                       ; noise A, tone B, clean tone C
+    ld a,7
+    call ay_write_register
+    ld e,0
+    ld a,8
+    call ay_write_register
+    ld e,0
+    ld a,9
+    call ay_write_register
+    ld e,0
+    ld a,10
+    call ay_write_register
+    call update_ay_engine
+    ret
+
+update_ay_sound:
+    call update_ay_engine
+    call update_ay_shot
+    call update_ay_explosion
+    jp update_ay_ding
+
+update_ay_engine:
+    ; requested_speed is the stable 0/1/2 control value. Using speed_pixels
+    ; here would make the slow 0.5x mode alternate between two engine pitches.
+    ld a,(requested_speed)
+    ld b,a
+    ld a,(ay_last_speed)
+    cp b
+    ret z
+    ld a,b
+    ld (ay_last_speed),a
+    ld e,a
+    ld d,0
+    ld hl,ay_engine_noise_periods
+    add hl,de
+    ld e,(hl)
+    ld a,6                          ; AY noise period: smaller means higher
+    call ay_write_register
+
+    ld a,(requested_speed)
+    ld e,a
+    ld d,0
+    ld hl,ay_engine_volumes
+    add hl,de
+    ld e,(hl)
+    ld a,8
+    jp ay_write_register
+
+update_ay_shot:
+    ; Atari's missile uses a short descending frequency sweep. The AY version
+    ; also fades its amplitude: tone period grows by eight each frame while
+    ; volume falls from 8 to 0 over sixteen frames.
+    ld a,(shot_sound_timer)
+    or a
+    ret z
+    dec a
+    ld (shot_sound_timer),a
+    ld d,a
+
+    ld a,(shot_sound_period)
+    ld e,a
+    ld a,2                          ; channel B tone period, low byte
+    call ay_write_register
+    ld e,0
+    ld a,3                          ; period never exceeds 255 in this sweep
+    call ay_write_register
+
+    ld a,d
+    inc a
+    srl a
+    ld e,a
+    ld a,9                          ; channel B amplitude
+    call ay_write_register
+
+    ld a,(shot_sound_period)
+    add a,8
+    ld (shot_sound_period),a
+    ret
+
+start_tank_shot_sound:
+    ; The gun reuses weapon channel B but starts higher and louder than the
+    ; player's missile, producing a sharper, more aggressive downward sweep.
+    ld a,25
+    ld (shot_sound_timer),a
+    ld a,12
+    ld (shot_sound_period),a
+    ret
+
+start_ay_explosion:
+    ; A fresh actor hit restarts a short, low impact envelope on channel C.
+    ; Its tone falls while the shared noise generator supplies the initial
+    ; crackle. The engine's noise period is restored when the burst finishes.
+    ld a,16
+    ld (explosion_sound_timer),a
+    ld hl,384
+    ld (explosion_sound_period),hl
+    jr start_noisy_channel_c
+
+start_ay_splash:
+    ; A water landing is softer, shorter and lower than a sprite explosion.
+    ld a,8
+    ld (explosion_sound_timer),a
+    ld hl,768
+    ld (explosion_sound_period),hl
+start_noisy_channel_c:
+    xor a
+    ld (ding_sound_timer),a
+    ld e,0x11                       ; add noise to channel C during impact
+    ld a,7
+    jp ay_write_register
+
+start_fuel_ding:
+    ; Atari distinguishes ordinary refuelling from contact with an already
+    ; full tank. Keep one stable pitch throughout filling, then jump exactly
+    ; one octave for the repeating full-tank confirmation ping.
+    ld a,(explosion_sound_timer)
+    or a
+    ret nz                          ; explosions have priority on channel C
+    ld a,(fuel_level)
+    cp 48
+    ld a,160                        ; normal refuelling ping
+    jr c,store_fuel_ding_period
+    ld a,80                         ; full tank: one octave higher
+store_fuel_ding_period:
+    ld (ding_sound_period),a
+    ld a,4
+    ld (ding_sound_timer),a
+    ld e,0x31                       ; clean tone C, without explosion noise
+    ld a,7
+    jp ay_write_register
+
+update_ay_ding:
+    ld a,(ding_sound_timer)
+    or a
+    ret z
+    dec a
+    ld (ding_sound_timer),a
+    push af
+    ld a,(ding_sound_period)
+    ld e,a
+    ld a,4
+    call ay_write_register
+    ld e,0
+    ld a,5
+    call ay_write_register
+    pop af
+    add a,a
+    add a,a                        ; amplitudes 12, 8, 4, 0
+    ld e,a
+    ld a,10
+    jp ay_write_register
+
+update_ay_explosion:
+    ld a,(explosion_sound_timer)
+    or a
+    ret z
+    dec a
+    ld (explosion_sound_timer),a
+
+    ld hl,(explosion_sound_period)
+    ld e,l
+    ld a,4                          ; channel C tone period low byte
+    call ay_write_register
+    ld hl,(explosion_sound_period)
+    ld e,h
+    ld a,5                          ; channel C tone period high nibble
+    call ay_write_register
+    ld e,31                         ; coarse low noise during the impact
+    ld a,6
+    call ay_write_register
+
+    ld a,(explosion_sound_timer)
+    ld e,a                          ; linear 15..0 amplitude decay
+    ld a,10
+    call ay_write_register
+
+    ld hl,(explosion_sound_period)
+    ld de,64                        ; increasing period = rapidly falling tone
+    add hl,de
+    ld (explosion_sound_period),hl
+    ld a,(explosion_sound_timer)
+    or a
+    ret nz
+    ld e,0x31                       ; return C from noisy burst to clean tone
+    ld a,7
+    call ay_write_register
+    ld a,(game_state)
+    or a
+    ret nz                          ; player-crash pause keeps engine silent
+    ld a,255                        ; force channel A noise-period restoration
+    ld (ay_last_speed),a
+    jp update_ay_engine
+
+silence_ay:
+    ld e,0
+    ld a,8
+    call ay_write_register
+    ld e,0
+    ld a,9
+    call ay_write_register
+    ld e,0
+    ld a,10
+    call ay_write_register
+    xor a
+    ld (shot_sound_timer),a
+    ld (explosion_sound_timer),a
+    ld (ding_sound_timer),a
+                                    ; callers may rely on a cleared accumulator
+    ret
+
+ay_write_register:
+    ; Input A=register, E=value. Spectrum 128K selects through FFFD and writes
+    ; data through BFFD. C stays FD, so changing only B selects the data port.
+    ld bc,0xfffd
+    out (c),a
+    ld b,0xbf
+    ld a,e
+    out (c),a
+    ret
+
+
+; ---------------------------------------------------------------------------
+; Keyboard and border profiling
 ; ---------------------------------------------------------------------------
 
 read_keyboard:
@@ -2616,6 +5307,10 @@ fire_pressed:
     ld a,(player_y)
     sub 4
     ld (bullet_y),a
+    ld a,17                         ; 16 audible AY frames plus final mute
+    ld (shot_sound_timer),a
+    ld a,80                         ; lower initial pitch; period rises per frame
+    ld (shot_sound_period),a
     ld a,1
     ld (fire_pending),a
     jr read_reset_key
@@ -2669,6 +5364,12 @@ block_motion_table:
     db 255,0, 255,0, 255,0, 255,0
     db 0,1, 0,255
 
+ay_engine_noise_periods:
+    ; Slow, normal, fast. AY noise frequency rises as the period falls.
+    db 31,20,10
+ay_engine_volumes:
+    db 4,6,8
+
 fork_left_offsets:
     db 0,255,255,254,254,254,254,255,255,0
 fork_widths:
@@ -2681,8 +5382,10 @@ player_jet_sprite:
     db 0x0f,0xfc, 0x3f,0xff, 0x3f,0xff, 0x3c,0xcf
     db 0x30,0xc3, 0x00,0xc0, 0x03,0xf0, 0x0f,0xfc, 0x0c,0xcc
 
-bullet_sprite:
-    db 0x01,0x80, 0x01,0x80, 0x01,0x80, 0x01,0x80
+projectile_mask_table:
+    ; A two-pixel column shifted through a byte. Only shift seven spills.
+    db 0xc0,0x00, 0x60,0x00, 0x30,0x00, 0x18,0x00
+    db 0x0c,0x00, 0x06,0x00, 0x03,0x00, 0x01,0x80
 
 atari_ship_sprite:
     db 0x03,0x00, 0x03,0x00, 0x0f,0x00, 0x3f,0xc0
@@ -2694,23 +5397,42 @@ enemy_plane_sprite:
     db 0x30,0xff, 0x0f,0xc0, 0x0f,0x00, 0x00,0x00
 
 atari_helicopter_sprite:
-    ; Exact ten scanlines read from the Atari 2600 black-and-white capture:
-    ; three rotor/mast rows followed by the cabin, tail and landing gear.
+    ; Exact Heli0/Heli1 output reconstructed by interleaving the Atari 2600
+    ; Heli*A and Heli*B kernel rows, then doubling every source pixel in X.
+    ; Only the first two rotor scanlines change between animation frames.
+    db 0x00,0x3f, 0x03,0xf0, 0x00,0x30, 0x00,0xfc, 0xc3,0xff
+    db 0xff,0xff, 0xff,0xff, 0xc0,0xfc, 0x00,0x30, 0x00,0xfc
+
+atari_helicopter_sprite_alt:
     db 0x03,0xf0, 0x00,0x3f, 0x00,0x30, 0x00,0xfc, 0xc3,0xff
     db 0xff,0xff, 0xff,0xff, 0xc0,0xfc, 0x00,0x30, 0x00,0xfc
 
-; New tank, built with the same eight-bit-wide/double-X constraints.
-atari_tank_sprite:
-    db 0x03,0xc0, 0x03,0xc0, 0x0f,0xf0, 0x3f,0xfc, 0xff,0xff
-    db 0xcf,0xf3, 0xff,0xff, 0xff,0xff, 0xcc,0x33, 0xff,0xff
+atari_helicopter_sprite_left:
+    ; Atari used REFP1 to mirror the whole player object. Spectrum needs the
+    ; reflected bytes explicitly so a helicopter always faces its movement.
+    db 0xfc,0x00, 0x0f,0xc0, 0x0c,0x00, 0x3f,0x00, 0xff,0xc3
+    db 0xff,0xff, 0xff,0xff, 0x3f,0x03, 0x0c,0x00, 0x3f,0x00
 
-life_icon_one_sprite:
-    db 0x18,0x00, 0x3c,0x00, 0xff,0x00, 0x7e,0x00
-    db 0x18,0x00, 0x3c,0x00, 0x66,0x00
+atari_helicopter_sprite_left_alt:
+    db 0x0f,0xc0, 0xfc,0x00, 0x0c,0x00, 0x3f,0x00, 0xff,0xc3
+    db 0xff,0xff, 0xff,0xff, 0x3f,0x03, 0x0c,0x00, 0x3f,0x00
 
-life_icon_two_sprite:
-    db 0x18,0x18, 0x3c,0x3c, 0xff,0xff, 0x7e,0x7e
-    db 0x18,0x18, 0x3c,0x3c, 0x66,0x66
+; Side-view tank: a small turret and barrel sit clearly above the rectangular
+; body and broken track. Mirrored data makes the gun point toward the river.
+tank_facing_right_sprite:
+    db 0x07,0x80, 0x07,0x80, 0x03,0xff, 0x0f,0xf0, 0x3f,0xfc
+    db 0xff,0xff, 0xff,0xff, 0xcc,0x33, 0xff,0xff, 0x3f,0xfc
+
+tank_facing_left_sprite:
+    db 0x01,0xe0, 0x01,0xe0, 0xff,0xc0, 0x0f,0xf0, 0x3f,0xfc
+    db 0xff,0xff, 0xff,0xff, 0xcc,0x33, 0xff,0xff, 0x3f,0xfc
+
+tank_splash_sprite_0:
+    ; Descending ball and first two drops.
+    db 0x01,0x80, 0x03,0xc0, 0x01,0x80, 0x00,0x00, 0x08,0x10, 0x03,0xc0
+tank_splash_sprite_1:
+    ; The ball disappears into two widening water rings.
+    db 0x00,0x00, 0x08,0x10, 0x04,0x20, 0x00,0x00, 0x0f,0xf0, 0x3c,0x3c
 
 explosion_sprite_0:
     db 0x00,0x00, 0x00,0x00, 0x01,0x80, 0x02,0x40
@@ -2731,6 +5453,123 @@ game_over_text:
     db 71,65,77,69,32,79,86,69,82
 restart_text:
     db 70,73,82,69,32,84,79,32,82,69,83,84,65,82,84
+
+hud_text:
+    db 76,73,86,69,83,58
+hud_life_digit:
+    db 50
+    db 32,70,85,69,76,58
+fuel_meter_0: db 35
+fuel_meter_1: db 35
+fuel_meter_2: db 35
+fuel_meter_3: db 35
+fuel_meter_4: db 35
+fuel_meter_5: db 35
+    db 32,83,67,79,82,69,58
+score_digit_0: db 48
+score_digit_1: db 48
+score_digit_2: db 48
+score_digit_3: db 48
+score_digit_4: db 48
+score_digit_5: db 48
+
+; Four compact 8x8 cells form the vertical Atari-style refuelling depot. Like
+; the original FuelA/FuelB data, set pixels are the solid coloured body and the
+; letters are transparent cut-outs. The attribute painter assigns stable
+; white/magenta/white/magenta bands while the cut-outs show blue river water.
+fuel_vertical_sprite:
+    ; F
+    db 0xff,0x81,0x9f,0x9f,0x83,0x9f,0x9f,0xff
+    ; U
+    db 0xff,0x99,0x99,0x99,0x99,0x99,0xc3,0xff
+    ; E
+    db 0xff,0x81,0x9f,0x9f,0x83,0x9f,0x81,0xff
+    ; L
+    db 0xff,0x9f,0x9f,0x9f,0x9f,0x9f,0x81,0xff
+
+; The original 16-bit boat above is expanded once in the source to 32 pixels:
+; every Atari-shaped pixel becomes two Spectrum pixels. Each X shift stores
+; eight rows of five bytes (four visible bytes plus a right-hand spill byte).
+ship_wide_shift_table:
+    dw ship_wide_shift_data,ship_wide_shift_data+40
+    dw ship_wide_shift_data+80,ship_wide_shift_data+120
+    dw ship_wide_shift_data+160,ship_wide_shift_data+200
+    dw ship_wide_shift_data+240,ship_wide_shift_data+280
+ship_wide_shift_data:
+    db 0x00,0x0f,0x00,0x00,0x00,0x00,0x0f,0x00,0x00,0x00
+    db 0x00,0xff,0x00,0x00,0x00,0x0f,0xff,0xf0,0x00,0x00
+    db 0xff,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0xf0,0x00
+    db 0xff,0xff,0xff,0x00,0x00,0x0f,0xff,0xff,0x00,0x00
+    db 0x00,0x07,0x80,0x00,0x00,0x00,0x07,0x80,0x00,0x00
+    db 0x00,0x7f,0x80,0x00,0x00,0x07,0xff,0xf8,0x00,0x00
+    db 0x7f,0xff,0xff,0xff,0x80,0x7f,0xff,0xff,0xf8,0x00
+    db 0x7f,0xff,0xff,0x80,0x00,0x07,0xff,0xff,0x80,0x00
+    db 0x00,0x03,0xc0,0x00,0x00,0x00,0x03,0xc0,0x00,0x00
+    db 0x00,0x3f,0xc0,0x00,0x00,0x03,0xff,0xfc,0x00,0x00
+    db 0x3f,0xff,0xff,0xff,0xc0,0x3f,0xff,0xff,0xfc,0x00
+    db 0x3f,0xff,0xff,0xc0,0x00,0x03,0xff,0xff,0xc0,0x00
+    db 0x00,0x01,0xe0,0x00,0x00,0x00,0x01,0xe0,0x00,0x00
+    db 0x00,0x1f,0xe0,0x00,0x00,0x01,0xff,0xfe,0x00,0x00
+    db 0x1f,0xff,0xff,0xff,0xe0,0x1f,0xff,0xff,0xfe,0x00
+    db 0x1f,0xff,0xff,0xe0,0x00,0x01,0xff,0xff,0xe0,0x00
+    db 0x00,0x00,0xf0,0x00,0x00,0x00,0x00,0xf0,0x00,0x00
+    db 0x00,0x0f,0xf0,0x00,0x00,0x00,0xff,0xff,0x00,0x00
+    db 0x0f,0xff,0xff,0xff,0xf0,0x0f,0xff,0xff,0xff,0x00
+    db 0x0f,0xff,0xff,0xf0,0x00,0x00,0xff,0xff,0xf0,0x00
+    db 0x00,0x00,0x78,0x00,0x00,0x00,0x00,0x78,0x00,0x00
+    db 0x00,0x07,0xf8,0x00,0x00,0x00,0x7f,0xff,0x80,0x00
+    db 0x07,0xff,0xff,0xff,0xf8,0x07,0xff,0xff,0xff,0x80
+    db 0x07,0xff,0xff,0xf8,0x00,0x00,0x7f,0xff,0xf8,0x00
+    db 0x00,0x00,0x3c,0x00,0x00,0x00,0x00,0x3c,0x00,0x00
+    db 0x00,0x03,0xfc,0x00,0x00,0x00,0x3f,0xff,0xc0,0x00
+    db 0x03,0xff,0xff,0xff,0xfc,0x03,0xff,0xff,0xff,0xc0
+    db 0x03,0xff,0xff,0xfc,0x00,0x00,0x3f,0xff,0xfc,0x00
+    db 0x00,0x00,0x1e,0x00,0x00,0x00,0x00,0x1e,0x00,0x00
+    db 0x00,0x01,0xfe,0x00,0x00,0x00,0x1f,0xff,0xe0,0x00
+    db 0x01,0xff,0xff,0xff,0xfe,0x01,0xff,0xff,0xff,0xe0
+    db 0x01,0xff,0xff,0xfe,0x00,0x00,0x1f,0xff,0xfe,0x00
+
+; The patrol ship uses this horizontally reflected cache while moving left.
+; It has the same 8 shifts x 8 rows x 5 bytes layout as the right-facing data,
+; so direction changes add only a table selection and no per-frame mirroring.
+ship_left_wide_shift_table:
+    dw ship_left_wide_shift_data,ship_left_wide_shift_data+40
+    dw ship_left_wide_shift_data+80,ship_left_wide_shift_data+120
+    dw ship_left_wide_shift_data+160,ship_left_wide_shift_data+200
+    dw ship_left_wide_shift_data+240,ship_left_wide_shift_data+280
+ship_left_wide_shift_data:
+    db 0x00,0x00,0xf0,0x00,0x00,0x00,0x00,0xf0,0x00,0x00
+    db 0x00,0x00,0xff,0x00,0x00,0x00,0x0f,0xff,0xf0,0x00
+    db 0xff,0xff,0xff,0xff,0x00,0x0f,0xff,0xff,0xff,0x00
+    db 0x00,0xff,0xff,0xff,0x00,0x00,0xff,0xff,0xf0,0x00
+    db 0x00,0x00,0x78,0x00,0x00,0x00,0x00,0x78,0x00,0x00
+    db 0x00,0x00,0x7f,0x80,0x00,0x00,0x07,0xff,0xf8,0x00
+    db 0x7f,0xff,0xff,0xff,0x80,0x07,0xff,0xff,0xff,0x80
+    db 0x00,0x7f,0xff,0xff,0x80,0x00,0x7f,0xff,0xf8,0x00
+    db 0x00,0x00,0x3c,0x00,0x00,0x00,0x00,0x3c,0x00,0x00
+    db 0x00,0x00,0x3f,0xc0,0x00,0x00,0x03,0xff,0xfc,0x00
+    db 0x3f,0xff,0xff,0xff,0xc0,0x03,0xff,0xff,0xff,0xc0
+    db 0x00,0x3f,0xff,0xff,0xc0,0x00,0x3f,0xff,0xfc,0x00
+    db 0x00,0x00,0x1e,0x00,0x00,0x00,0x00,0x1e,0x00,0x00
+    db 0x00,0x00,0x1f,0xe0,0x00,0x00,0x01,0xff,0xfe,0x00
+    db 0x1f,0xff,0xff,0xff,0xe0,0x01,0xff,0xff,0xff,0xe0
+    db 0x00,0x1f,0xff,0xff,0xe0,0x00,0x1f,0xff,0xfe,0x00
+    db 0x00,0x00,0x0f,0x00,0x00,0x00,0x00,0x0f,0x00,0x00
+    db 0x00,0x00,0x0f,0xf0,0x00,0x00,0x00,0xff,0xff,0x00
+    db 0x0f,0xff,0xff,0xff,0xf0,0x00,0xff,0xff,0xff,0xf0
+    db 0x00,0x0f,0xff,0xff,0xf0,0x00,0x0f,0xff,0xff,0x00
+    db 0x00,0x00,0x07,0x80,0x00,0x00,0x00,0x07,0x80,0x00
+    db 0x00,0x00,0x07,0xf8,0x00,0x00,0x00,0x7f,0xff,0x80
+    db 0x07,0xff,0xff,0xff,0xf8,0x00,0x7f,0xff,0xff,0xf8
+    db 0x00,0x07,0xff,0xff,0xf8,0x00,0x07,0xff,0xff,0x80
+    db 0x00,0x00,0x03,0xc0,0x00,0x00,0x00,0x03,0xc0,0x00
+    db 0x00,0x00,0x03,0xfc,0x00,0x00,0x00,0x3f,0xff,0xc0
+    db 0x03,0xff,0xff,0xff,0xfc,0x00,0x3f,0xff,0xff,0xfc
+    db 0x00,0x03,0xff,0xff,0xfc,0x00,0x03,0xff,0xff,0xc0
+    db 0x00,0x00,0x01,0xe0,0x00,0x00,0x00,0x01,0xe0,0x00
+    db 0x00,0x00,0x01,0xfe,0x00,0x00,0x00,0x1f,0xff,0xe0
+    db 0x01,0xff,0xff,0xff,0xfe,0x00,0x1f,0xff,0xff,0xfe
+    db 0x00,0x01,0xff,0xff,0xfe,0x00,0x01,0xff,0xff,0xe0
 
 align 256
 screen_line_table:
@@ -2764,12 +5603,14 @@ screen_line_table:
 ; State
 ; ---------------------------------------------------------------------------
 
+; Scroll/generator state. The six 256-byte arrays below contain only 32 live
+; entries, but page alignment lets a block index be installed directly in L.
 course_block_head: db 31
 course_phase: db 7
-speed_pixels: db 1
+speed_pixels: db 1               ; resolved scroll for this frame: 0, 1 or 2
 paused: db 0
-fire_down: db 0
-r_down: db 0
+fire_down: db 0                  ; edge detector shared by SPACE and FIRE
+r_down: db 0                     ; edge detector for manual new-game reset
 profile_enabled: db PROFILE_BORDER
 
 gen_center_q: db 32
@@ -2783,8 +5624,10 @@ fork_step: db 0
 next_feature: db 0
 bridge_spawn_pending: db 0
 generated_island_left: db 255
-generated_island_right: db 255
+generated_island_right: db 255   ; 255 in both island fields means no fork
 
+; Scratch shared by full and dirty renderers. Keeping these in RAM releases
+; registers for the byte masks and avoids stack traffic in the inner row code.
 dirty_first_y: db 0
 dirty_y: db 0
 dirty_residues: db 0
@@ -2792,6 +5635,9 @@ row_block_index: db 0
 row_screen_addr: dw 0
 redraw_y: db 0
 
+; Actor X coordinates are real pixels. tank_col is retained only as temporary
+; byte geometry when placing a shore tank; drawing and collision use tank_x.
+; Y always refers to the top scanline of the sprite.
 player_y: db 170
 player_x: db 120
 player_move: db 0
@@ -2800,24 +5646,65 @@ bullet_active: db 0
 fire_pending: db 0
 bullet_y: db 166
 bullet_x: db 120
+bullet_background_y: db 0
+bullet_background_rows: db 0
+bullet_background_col: db 0
+bullet_background_mask_0: db 0
+bullet_background_mask_1: db 0
 ship0_y: db 24
-ship0_x: db 96
+ship0_x: db 96                   ; top-left of a 32-pixel hull
+ship0_active: db 1
+ship0_delay: db 0
 ship1_y: db 92
-ship1_x: db 136
+ship1_x: db 136                  ; top-left of a 32-pixel hull
+ship1_active: db 0
+ship1_delay: db 80
 ship1_dir: db 1
 ship1_timer: db 2
 enemy_plane_y: db 56
 enemy_plane_x: db 0
+enemy_plane_active: db 1          ; cleared permanently after a successful hit
 helicopter_y: db 126
 helicopter_x: db 120
+helicopter_active: db 0
+helicopter_delay: db 140
 helicopter_move: db 1
 helicopter_dir: db 1
+helicopter_frame: db 0            ; two mirrored rotor poses, body unchanged
+helicopter_anim_timer: db 2
+fuel_y: db 112
+fuel_x: db 112                     ; byte-aligned top-left of vertical 8x32 depot
+fuel_active: db 1
+fuel_delay: db 0
+fuel_level: db 48                  ; six HUD cells, eight units per cell
+fuel_consume_timer: db 32
+fuel_refill_timer: db 1
+fuel_refueling: db 0               ; skips consumption while player overlaps
 tank_y: db 46
 tank_col: db 3
+tank_x: db 24
 tank_side: db 0
 tank_active: db 1
 tank_delay: db 0
-bridge_active: db 0
+tank_fire_timer: db 72           ; initial bank-tank delay; later shots use 96
+bridge_tank_y: db 8
+bridge_tank_x: db 0
+bridge_tank_side: db 0            ; 0 enters from left, 1 enters from right
+bridge_tank_active: db 0
+bridge_tank_mode: db 0            ; 1=cross, 2=wait/fire, 3/4=pending
+bridge_tank_next_mode: db 0       ; alternates crossing and waiting bridges
+bridge_tank_fire_timer: db 12
+bridge_tank_move_phase: db 0      ; fixed speed alternates one/two-pixel steps
+firing_tank_y: db 0               ; selected shore/bridge firing-source scratch
+firing_tank_side: db 0
+tank_shell_active: db 0           ; 0=absent, 1=flying, 2=landing splash
+tank_shell_y: db 50
+tank_shell_x: db 40              ; actual left edge of the 2x2 projectile
+tank_shell_dir: db 1             ; 1=right, 255=left
+tank_shell_target_x: db 120       ; safe water point selected when fired
+tank_splash_timer: db 0
+bridge_active: db 0              ; bridge bitmap persists between frames
+destroyed_road_active: db 0      ; white approaches remain after span removal
 bridge_y: db 0
 bridge_col: db 0
 bridge_width: db 0
@@ -2826,30 +5713,72 @@ bridge_restore_y: db 0
 bridge_restore_rows: db 0
 bridge_attr_row: db 0
 bridge_attr_rows: db 0
+bridge_center_attr: db 0x0a       ; brown intact span or normal broken water
+bridge_edge_residue: db 0         ; dirty modulo-eight class under the bridge
+bridge_edge_residues: db 0        ; remaining classes: one per scroll pixel
+bridge_edge_y: db 0               ; first of two bridge rows in that class
+road_mark_y: db 0
+road_mark_rows: db 0
 dirty_old_island_left: db 255
 dirty_old_island_right: db 255
 dirty_new_island_left: db 255
 dirty_new_island_right: db 255
-sprite_saved_sp: dw 0
+sprite_saved_sp: dw 0            ; real SP while POP HL walks scanline table
+
+; One-time cache builder scratch. Runtime blitters never use these fields.
 precompute_source: dw 0
 precompute_cursor: dw 0
 precompute_dest: dw 0
 precompute_height: db 0
 precompute_rows: db 0
 precompute_shift: db 0
-requested_speed: db 1
-slow_phase: db 0
-joystick_state: db 0
+requested_speed: db 1            ; raw Q/A/Kempston request before 0.5x phase
+slow_phase: db 0                 ; alternates 0/1 scroll for average 0.5 px
+joystick_state: db 0             ; sanitized Kempston bits 0..4
+ay_last_speed: db 255             ; avoids rewriting unchanged engine registers
+shot_sound_timer: db 0            ; 17..0 software amplitude/frequency envelope
+shot_sound_period: db 80           ; larger AY period gives the requested lower shot
+explosion_sound_timer: db 0       ; channel C impact envelope, 16..0
+explosion_sound_period: dw 384
+ding_sound_timer: db 0             ; four-frame channel C refuelling bell
+ding_sound_period: db 160          ; normal refuel ping; full-tank ping uses 80
+
+; Game/HUD state. Score digits live beside hud_text in writable constant data;
+; direct ASCII carry makes a HUD refresh division-free.
 lives: db 2
 game_state: db 0                 ; 0=playing, 1=explosion, 2=game over
+hud_dirty: db 1                  ; bit 0=lives, bit 1=score
+hud_initialized: db 0            ; GAME OVER clears the otherwise static line
+hud_update_mask: db 0            ; saved bit mask while ROM glyphs are copied
+score_redraw_count: db 4         ; 1 normally, grows leftward when 9 carries
+hud_clear_y: db 0
+object_collision_width: db 16    ; temporarily 32 while testing either ship
 explosion_timer: db 0
 explosion_anim_timer: db 0
 explosion_frame: db 0
+hit_explosion_active: db 0        ; short impact animation for shot actors
+hit_explosion_x: db 0
+hit_explosion_y: db 8
+hit_explosion_timer: db 0
+hit_explosion_anim_timer: db 0
+hit_explosion_frame: db 0
+actor_spawn_y: db 8               ; candidate used by vertical deconfliction
+actor_spawn_attempts: db 0
+actor_spawn_height: db 8
+
+; Shared rectangle painter scratch for white helicopter and yellow explosion
+; attributes. Rows 0 and 23 are rejected by the painter.
 object_attr_value: db 0
 object_attr_width: db 0
 object_attr_col: db 0
 object_attr_row: db 0
 object_attr_rows: db 0
+fuel_attr_rows_remaining: db 0    ; custom F/U/E/L alternating-colour painter
+fuel_attr_phase: db 0             ; 0=white band, 1=magenta band
+fuel_attr_repeat: db 0            ; handles an attribute boundary after midpoint
+
+; Minimal ROM-font renderer scratch. Text is copied only for HUD changes and
+; the GAME OVER screen, so these bytes are intentionally not performance-hot.
 text_cursor: dw 0
 text_remaining: db 0
 text_y: db 0
@@ -2886,14 +5815,6 @@ player_shift_table:
     dw player_shift_data,player_shift_data+39,player_shift_data+78
     dw player_shift_data+117,player_shift_data+156,player_shift_data+195
     dw player_shift_data+234,player_shift_data+273
-bullet_shift_table:
-    dw bullet_shift_data,bullet_shift_data+12,bullet_shift_data+24
-    dw bullet_shift_data+36,bullet_shift_data+48,bullet_shift_data+60
-    dw bullet_shift_data+72,bullet_shift_data+84
-ship_shift_table:
-    dw ship_shift_data,ship_shift_data+24,ship_shift_data+48
-    dw ship_shift_data+72,ship_shift_data+96,ship_shift_data+120
-    dw ship_shift_data+144,ship_shift_data+168
 enemy_plane_shift_table:
     dw enemy_plane_shift_data,enemy_plane_shift_data+24
     dw enemy_plane_shift_data+48,enemy_plane_shift_data+72
@@ -2904,6 +5825,32 @@ helicopter_shift_table:
     dw helicopter_shift_data+60,helicopter_shift_data+90
     dw helicopter_shift_data+120,helicopter_shift_data+150
     dw helicopter_shift_data+180,helicopter_shift_data+210
+
+helicopter_alt_shift_table:
+    dw helicopter_alt_shift_data,helicopter_alt_shift_data+30
+    dw helicopter_alt_shift_data+60,helicopter_alt_shift_data+90
+    dw helicopter_alt_shift_data+120,helicopter_alt_shift_data+150
+    dw helicopter_alt_shift_data+180,helicopter_alt_shift_data+210
+helicopter_left_shift_table:
+    dw helicopter_left_shift_data,helicopter_left_shift_data+30
+    dw helicopter_left_shift_data+60,helicopter_left_shift_data+90
+    dw helicopter_left_shift_data+120,helicopter_left_shift_data+150
+    dw helicopter_left_shift_data+180,helicopter_left_shift_data+210
+helicopter_left_alt_shift_table:
+    dw helicopter_left_alt_shift_data,helicopter_left_alt_shift_data+30
+    dw helicopter_left_alt_shift_data+60,helicopter_left_alt_shift_data+90
+    dw helicopter_left_alt_shift_data+120,helicopter_left_alt_shift_data+150
+    dw helicopter_left_alt_shift_data+180,helicopter_left_alt_shift_data+210
+tank_right_shift_table:
+    dw tank_right_shift_data,tank_right_shift_data+30
+    dw tank_right_shift_data+60,tank_right_shift_data+90
+    dw tank_right_shift_data+120,tank_right_shift_data+150
+    dw tank_right_shift_data+180,tank_right_shift_data+210
+tank_left_shift_table:
+    dw tank_left_shift_data,tank_left_shift_data+30
+    dw tank_left_shift_data+60,tank_left_shift_data+90
+    dw tank_left_shift_data+120,tank_left_shift_data+150
+    dw tank_left_shift_data+180,tank_left_shift_data+210
 explosion_0_shift_table:
     dw explosion_0_shift_data,explosion_0_shift_data+39
     dw explosion_0_shift_data+78,explosion_0_shift_data+117
@@ -2921,10 +5868,13 @@ explosion_2_shift_table:
     dw explosion_2_shift_data+234,explosion_2_shift_data+273
 
 player_shift_data: ds 312,0
-bullet_shift_data: ds 96,0
-ship_shift_data: ds 192,0
 enemy_plane_shift_data: ds 192,0
 helicopter_shift_data: ds 240,0
+helicopter_alt_shift_data: ds 240,0
+helicopter_left_shift_data: ds 240,0
+helicopter_left_alt_shift_data: ds 240,0
+tank_right_shift_data: ds 240,0
+tank_left_shift_data: ds 240,0
 explosion_0_shift_data: ds 312,0
 explosion_1_shift_data: ds 312,0
 explosion_2_shift_data: ds 312,0
