@@ -1,145 +1,173 @@
-# Attribute Raid
+# Attribute Raid — renderer V3
 
-Minimal ZX Spectrum 48K proof of concept for a River Raid style river
-renderer.  It is still a renderer experiment: there is no shooting, score,
-fuel, bridges, music, menu, or complete collision system.
+Prototyp gry w stylu River Raid dla ZX Spectrum 48K. Kod wykonywany na
+Spectrum jest napisany w dobrze komentowanym assemblerze Z80. Nie ma kodu C.
 
-## Build
+V3 świadomie zbliża geometrię do wersji Atari 2600: brzegi są zbudowane z
+dużych, schodkowych fragmentów, ale przewijają się płynnie co jeden piksel.
+Bitmapa ekranu nigdy nie jest kopiowana ani przewijana. Renderer zmienia tylko
+linie, które właśnie przekroczyły granicę bloku świata. Sprite'y są usuwane i
+rysowane przez XOR, a szeroki most jest utrzymywany przyrostowo.
+
+To nadal prototyp, nie kompletna gra, ale ma już podstawową pętlę rozgrywki:
+sterowanie samolotem, dwa biegi, pocisk, zderzenia, dwa życia, animację
+eksplozji oraz ekran `GAME OVER`. Nie ma jeszcze paliwa, punktów, dźwięku ani
+logiki pełnych poziomów.
+
+## Budowanie i uruchamianie
 
 ```sh
 make
-```
-
-The result is:
-
-```text
-build/attribute-raid.tap
-```
-
-`make clean` removes the build directory.
-
-To launch the TAP in the local ZEsarUX app:
-
-```sh
 make run
 ```
 
-To build and run the Timex Computer 2048 variant with Timex dual-screen page
-flipping:
+Wynik powstaje jako `build/attribute-raid.tap`. Pozostałe cele:
 
 ```sh
-make run-timex
+make profile      # border pokazuje czas pełnej aktualizacji gry
+make run-profile
+make clean
 ```
 
-The local machine did not have `sjasmplus`, `z88dk-z80asm`, `z80asm`,
-`pasmo`, `zcc`, `pyz80`, `zmac`, `rasm`, or `vasmz80_oldstyle` in `PATH`.
-The project therefore includes `tools/build.py`, a small assembler for the
-subset used by `src/main.asm`, plus a TAP writer.  No binary tools are
-vendored.
+Program startuje od `32768` (`0x8000`). `tools/build.py` jest małym assemblerem
+używanego podzbioru Z80 oraz generatorem loadera BASIC i pliku TAP, więc
+repozytorium nie wymaga zewnętrznego toolchainu Z80.
 
-## Running
+## Sterowanie
 
-Load `build/attribute-raid.tap` in a ZX Spectrum 48K emulator.  The BASIC
-loader clears RAM below the code, loads the CODE block at 32768, and starts it
-with `RANDOMIZE USR 32768`.
+- `O` / `P` — samolot gracza w lewo / w prawo (2 px/klatkę),
+- bez klawisza prędkości — bieg bazowy (1 px/klatkę),
+- przytrzymane `Q` — chwilowo szybciej (2 px/klatkę),
+- przytrzymane `A` — chwilowo wolniej (średnio 0,5 px/klatkę),
+- `SPACE` — strzał,
+- `R` — rozpoczęcie nowej gry z dwoma życiami i nową trasą.
 
-Keys:
+Kempston joystick obsługuje lewo/prawo, FIRE oraz chwilową zmianę prędkości:
+wychylenie w górę odpowiada `Q`, a w dół odpowiada `A`. Cel `make run`
+uruchamia ZEsarUX z emulacją Kempstona. Po utracie drugiego życia `SPACE` lub
+FIRE rozpoczyna nową grę; najpierw trzeba puścić przycisk, aby przypadkowo nie
+pominąć ekranu `GAME OVER`.
 
-- `1`: 2 pixels per frame
-- `2`: 4 pixels per frame
-- `UP`: faster, up to 8 pixels per frame
-- `DOWN`: slower, down to 2 pixels per frame
-- `SPACE`: pause
-- `R`: rebuild the precomputed river course
+## Model V3
 
-## Graphics Model
+Jeden blok trasy ma osiem linii świata. Położenie obu brzegów jest wyrażone w
+jednostkach czterech pikseli, co daje charakterystyczne duże schodki. Generator
+utrzymuje ten sam ruch brzegu przez 5–12 bloków, czyli 40–96 linii. Długie
+proste i stałe skosy są dzięki temu częstsze niż drobny losowy zygzak. Taki
+odcinek można później skompresować do pary `długość + krok`.
 
-The screen uses the standard Spectrum bitmap at `0x4000` and attributes at
-`0x5800`.  All 768 attributes are initialized once to `0x4c`: bright green
-ink on blue paper.  During animation the attribute area is not touched.
+32 bloki tworzą pierścień. Sześć wyrównanych do stron tablic przechowuje:
 
-In the bitmap, bit `1` means land and bit `0` means water.  Full land and full
-water cells are therefore `0xff` and `0x00`.  Edge cells are rebuilt from
-`prefix_mask` and `suffix_mask` tables.  Each 2-pixel river sample is drawn as
-two identical bitmap scanlines; this keeps normal-frame rendering cheap enough
-for the 50 Hz budget.
+- kolumnę i maskę lewego brzegu,
+- kolumnę i maskę prawego brzegu,
+- opcjonalny lewy i prawy koniec wyspy.
 
-## River Representation
+Wyspa jest trzecim przedziałem lądu wewnątrz rzeki. Rośnie przez kolejne bloki,
+utrzymuje szerokość i zwęża się, tworząc prawdziwe rozwidlenie bez drugiego
+renderera ani bufora ekranu. Most pozostał osobnym obiektem, dobiera szerokość
+do aktualnego koryta i ma 16 scanline'ów wysokości.
 
-The river geometry has 2-pixel vertical resolution.  One sample describes two
-scanlines.  Two 1024-byte precomputed buffers store the banks:
+Po każdej próbce przewinięcia zmienia się tylko jedna ósma linii ekranu.
+Renderer aktualizuje więc:
 
-- `left_bank[i]`: first water pixel after the left land
-- `right_bank[i]`: first right-land pixel
+- 24 linie przy 1 px/klatkę,
+- 48 linii przy 2 px/klatkę.
 
-Only 96 samples are visible on the 192-pixel screen, but 1024 entries make the
-repeat much less obvious.  Bank motion is pseudo-random and deterministic: an
-8-bit LFSR builds short 1-2 sample movement segments during initialization, so
-the visible edges are jagged without random work during normal animation.
-The first course segment is kept wide, around 70-80% of the screen, by using a
-higher minimum river width at the beginning of the ring and at the wrapped
-entry point used by the initial scroll.  Later samples allow the river to
-narrow further.
+Na każdej takiej linii zapisuje trzy bajty lewego brzegu, trzy prawego oraz —
+tylko podczas rozwidlenia — krótki przedział wyspy. Pełne 6144 bajty bitmapy są
+rysowane wyłącznie przy starcie i po `R`.
 
-Scrolling does not move the bitmap.  Each frame changes the logical start
-index of the ring buffer by the current speed: one to four 2-pixel samples,
-or 2-8 pixels per frame.  Normal frames do not generate river samples; the
-precomputed course loops.
+## Kolor, most i sprite'y
 
-## Sprites
+Normalne komórki atrybutów mają wartość `0x4c`: BRIGHT 1, zielony INK i
+niebieski PAPER. Bit `1` bitmapy oznacza ląd lub obiekt, a bit `0` wodę. Most
+czasowo przełącza zajmowane komórki na `0x0a`, czyli ciemny czerwono-brązowy
+INK na niebieskim tle. Oryginalny Spectrum nie ma osobnej barwy brązowej;
+ciemna czerwień jest tutaj najbliższym czystym kolorem bez ditheringu.
 
-A prototype sprite layer draws one-cell 8 x 8 objects after the river
-background:
+Most także jest bitmapą, dlatego może zaczynać się na dowolnym Y i przesuwać
+płynnie o jeden piksel. Standardowe atrybuty ZX Spectrum są przywiązane do
+siatki 8×8, więc kolor obejmuje dwie lub trzy całe komórki i zmienia zasięg
+co osiem linii. Bitmapa mostu nadal porusza się co piksel. Renderer aktualizuje
+tylko jeden wchodzący lub wychodzący rząd atrybutów, zamiast przemalowywać
+cały prostokąt. Tryb Timex hi-colour nie jest wymagany.
 
-- a white player plane near the bottom of the river
-- three ships and three helicopters over the water, moving horizontally
-- simple tree and tank glyphs that scroll down along both banks
+Sylwetki gracza, statku, poprzecznego samolotu i helikoptera zostały
+zrekonstruowane z przeplatanych danych obiektów oryginalnego River Raid na
+Atari 2600 i rozszerzone poziomo 2×. Źródłem porównawczym był publiczny
+[dekompilat River Raid](https://gitlab.com/menelkir/atari-2600/-/blob/master/River%20Raid%20%28decomp%29.asm).
+Czołg jest nową sylwetką narysowaną według tych samych ograniczeń 8-bitowego
+wzoru rozszerzanego 2×.
 
-Sprite cells are redrawn over the reconstructed river background each frame.
-The plane switches to a crash glyph if the current river banks get too close
-to its fixed bottom-screen position.  This is intentionally a coarse renderer
-test, not a final gameplay or collision system.  Bank objects keep pixel `y`
-positions and move down at the current river speed.  Ships and helicopters use
-the same vertical motion while also moving sideways in pixel steps rather than
-whole character columns.  Their horizontally shifted forms are precomputed, so
-each frame only selects the needed phase and updates the cells touched by the
-sprite.
+Kolejność wierszy helikoptera i poprzecznego samolotu została dodatkowo
+sprawdzona na zrzutach Atari 2600; wcześniejsza tabela zamieniała parami
+wiersze pochodzące z przeplatanego obrazu. Helikopter używa białego INK na
+niebieskim PAPER. Atari mogło zmieniać kolor obiektu co scanline, natomiast
+Spectrum ma jeden zestaw kolorów na komórkę 8×8, dlatego dokładne czarno-białe
+pasy wymagałyby widocznego prostokąta attribute clash.
 
-The Timex build uses Timex video mode 1: screen 0 at `0x4000` and screen 1 at
-`0x6000`.  Each screen remembers which river index and sprite positions it
-contains, so the dirty renderer can update only the hidden page's old bank,
-ship, and helicopter cells before flipping it with port `0xff`.
+Aktualna scena zawiera:
 
-## Dirty Rendering
+- samolot gracza sterowany klawiszami `O` / `P`,
+- dwa statki: jeden pozostaje nieruchomy w osi X, drugi patroluje z prędkością
+  jednego rzeczywistego piksela co dwie klatki,
+- samolot przelatujący przez całe 256 pikseli z prędkością 3 px/klatkę; jego Y
+  przesuwa się razem z trasą, więc pozostaje na tej samej linii świata,
+- helikopter, którego kolejne pojawienia naprzemiennie stoją lub patrolują po
+  jednym pikselu na klatkę,
+- okresowy czołg na lewym albo prawym brzegu,
+- okresowy most i rozwidlenie.
 
-The full 32 x 24 cell screen is rendered only during startup and after `R`.
-Normal frames never copy the 6144-byte bitmap and never redraw all 768 cells.
+Domki i drzewa są celowo wyłączone w tej wersji.
 
-For each of the 24 tile rows, the renderer examines the four 2-pixel samples
-covered by that row.  It computes the byte-column range crossed by the old
-left bank, the new left bank, the old right bank, and the new right bank.  It
-then redraws only the union of the old and new range for each bank.
+Ruchome sprite'y są nakładane przez XOR. Blitter obsługuje dowolne przesunięcie
+bitowe, więc ruch 1–3 px nie jest serią skoków o pełne osiem pikseli. Osiem
+wariantów przesunięcia każdego kształtu powstaje raz przy starcie w pamięci
+RAM; czas rysowania nie zależy już od `X & 7`. Statek i helikopter pobierają
+granice aktualnej odnogi; podczas rozwidlenia wyspa działa dla nich jak drugi
+brzeg i wymusza zawrócenie. Na czas kilku linii sprite'a rejestr `SP` wskazuje
+tabelę adresów scanline'ów; kolejne `POP HL` omijają koszt wyliczania
+przeplatanej adresacji bitmapy Spectrum.
 
-There is no separate old-pixel map.  The two river buffers are the geometry
-map, and the renderer tracks the previous 10-bit start index for the screen it
-is updating.  Clearing is done by reconstructing complete cells from the new
-geometry across the old-and-new dirty range.
+Most nie jest kasowany w całości. Co klatkę odtwarzane są tylko 1–2 linie
+opuszczających jego górę, dopisywane są nowe linie na dole, a cztery bajty przy
+brzegach są odświeżane po rendererze rzeki. Dzięki temu 16-pikselowa grubość
+nie wymaga dwóch pełnych przebiegów po całym prostokącie.
 
-Because each bank still moves by at most one pixel per sample, the usual dirty
-width is one or two cells per bank per tile row, sometimes three cells around
-strong turns or byte boundaries.
+Kolizja brzegu nie korzysta już z prostokątnych granic odnogi. Wszystkie
+nieprzezroczyste piksele maski samolotu 16×13 są porównywane z faktyczną
+bitmapą: ustawiony bit oznacza brzeg, wyspę albo nienaruszony most. Dzięki temu
+przezroczyste narożniki sprite'a nie zabijają przed zetknięciem z lądem, a obie
+strony wyspy działają identycznie. Osobny, łagodniejszy rdzeń 6×6 wykrywa
+zderzenia ze statkami, helikopterem, poprzecznym samolotem i czołgiem.
 
-## Profiling
+Gracz zaczyna z dwoma życiami, pokazanymi jako małe ikony w lewym górnym
+rogu. Po kolizji samolot zastępuje trzyklatkowa eksplozja, a rzeka i pozostałe
+obiekty zatrzymują się na 75 klatek, czyli około 1,5 sekundy przy 50 Hz. Po
+pierwszym zgonie trasa startuje od nowa z jednym życiem; po drugim pojawia się
+osobny ekran `GAME OVER`.
 
-The border is kept black during normal animation.  Earlier development builds
-used yellow/red border profiling, but that made the emulator visibly flash
-while the renderer was being tuned.
+Pocisk leci w górę i może zniszczyć most. Statki oraz helikopter są odsuwane
+poza pionowy pas mostu i nie mogą przez niego przepłynąć; czołg celowo nie
+podlega tej regule i może znajdować się na brzegu na tej samej wysokości co
+most.
 
-In the current build environment the TAP structure and checksums were verified,
-but a visual 50 Hz emulator run was not completed because the ZEsarUX control
-server was not available on `localhost:10000`.
+## Zweryfikowany budżet
 
-The algorithm differs from classic full-screen scrolling by never shifting
-screen memory.  The visible river moves because screen rows read different
-ring-buffer samples after the logical start index changes, and only the cells
-where a bank changed are reconstructed.
+Pomiary wykonane protokołem debuggera ZEsarUX dla Spectrum 48K, na szybkim
+biegu 2 px/klatkę:
+
+- 65 223 takty w ciężkiej klatce z aktywnym mostem i wszystkimi
+  sprite'ami,
+- 61 582 takty przy wymuszonym, zmieniającym kształt rozwidleniu długości
+  dziesięciu bloków i wszystkich sprite'ach.
+
+Budżet klatki 50 Hz wynosi 69 888 taktów. Powyższe przypadki zajmują
+odpowiednio około 93,3% i 88,1% klatki. Generator planuje most i rozwidlenie
+jako osobne cechy trasy, więc ich najdroższe przebiegi nie nakładają się w
+normalnej sekwencji. Pozostaje około 4,7 tys. taktów w ciężkiej klatce mostu;
+przed dodaniem dźwięku i paliwa warto ponowić profilowanie.
+
+Test po usunięciu poruszonych sprite'ów porównał wszystkie 6144 bajty bitmapy
+z pełną rekonstrukcją z pierścienia trasy: liczba różniących się bajtów wyniosła
+`0`.

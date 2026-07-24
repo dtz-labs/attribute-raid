@@ -281,13 +281,28 @@ class Assembler:
             return b"\xed\xb0"
         if op == "rrca":
             return b"\x0f"
-        if op == "ex" and [a.lower() for a in args] == ["de", "hl"]:
-            return b"\xeb"
+        if op == "ex":
+            lowered = [a.lower() for a in args]
+            if lowered == ["de", "hl"]:
+                return b"\xeb"
+            if lowered == ["af", "af'"]:
+                return b"\x08"
 
         if op == "call":
             return bytes([0xCD]) + self.u16(self.expr(args[0]))
         if op == "jp":
-            return bytes([0xC3]) + self.u16(self.expr(args[0]))
+            if len(args) == 1:
+                return bytes([0xC3]) + self.u16(self.expr(args[0]))
+            jp_cond = {
+                "nz": 0xC2,
+                "z": 0xCA,
+                "nc": 0xD2,
+                "c": 0xDA,
+            }
+            cond = args[0].lower()
+            if cond not in jp_cond:
+                raise AsmError(f"unsupported JP condition {cond}")
+            return bytes([jp_cond[cond]]) + self.u16(self.expr(args[1]))
         if op == "djnz":
             return bytes([0x10, self.rel8(self.expr(args[0]), 2)])
         if op == "jr":
@@ -338,6 +353,11 @@ class Assembler:
             r = args[0].lower()
             if r in REG8:
                 return bytes([0xCB, 0x38 + REG8[r]])
+
+        if op == "rr":
+            r = args[0].lower()
+            if r in REG8:
+                return bytes([0xCB, 0x18 + REG8[r]])
 
         if op == "bit":
             bit = self.expr(args[0])
@@ -401,6 +421,10 @@ class Assembler:
                     return bytes([0x2A]) + self.u16(self.expr(mem))
                 if dst_l == "de":
                     return bytes([0xED, 0x5B]) + self.u16(self.expr(mem))
+                if dst_l == "sp":
+                    return bytes([0xED, 0x7B]) + self.u16(self.expr(mem))
+            if dst_l == "sp" and src_l == "hl":
+                return b"\xf9"
             return bytes([0x01 + REG16[dst_l] * 0x10]) + self.u16(self.expr(src))
 
         if dst_l == "(de)" and src_l == "a":
@@ -419,6 +443,8 @@ class Assembler:
                 return bytes([0x22]) + self.u16(self.expr(mem))
             if src_l == "de":
                 return bytes([0xED, 0x53]) + self.u16(self.expr(mem))
+            if src_l == "sp":
+                return bytes([0xED, 0x73]) + self.u16(self.expr(mem))
 
         raise AsmError(f"unsupported LD operands: {dst}, {src}")
 
@@ -484,7 +510,7 @@ def main() -> int:
     parser.add_argument("outdir", type=Path)
     args = parser.parse_args()
 
-    defines = {"TIMEX_DOUBLE_BUFFER": 0}
+    defines = {"PROFILE_BORDER": 0}
     for item in args.define:
         if "=" in item:
             name, value = item.split("=", 1)

@@ -1,11 +1,10 @@
-.PHONY: all run timex run-timex clean
+.PHONY: all run profile run-profile clean
 
 OUTDIR := build
 TAP := $(OUTDIR)/attribute-raid.tap
 DEFINES ?=
-MACHINE ?= 48k
 ZESARUX ?= /Applications/ZEsarUX.app/Contents/MacOS/zesarux
-ZESARUX_FLAGS ?=
+ZESARUX_FLAGS ?= --joystickemulated "Kempston"
 ZESARUX_DIR := $(dir $(ZESARUX))
 
 all: $(TAP)
@@ -18,15 +17,14 @@ $(OUTDIR):
 
 run: $(TAP)
 	@test -x "$(ZESARUX)" || { echo "ZEsarUX binary not found: $(ZESARUX)" >&2; exit 1; }
-	cd "$(ZESARUX_DIR)" && ./zesarux --noconfigfile --machine $(MACHINE) \
+	cd "$(ZESARUX_DIR)" && ./zesarux --noconfigfile --machine 48k \
 		$(ZESARUX_FLAGS) --nosplash --verbose 0 "$(abspath $(TAP))"
 
-timex:
-	$(MAKE) OUTDIR=build-timex DEFINES="-D TIMEX_DOUBLE_BUFFER=1" MACHINE=TC2048 all
+profile:
+	$(MAKE) OUTDIR=build-profile DEFINES="-D PROFILE_BORDER=1" all
 
-run-timex:
-	$(MAKE) OUTDIR=build-timex DEFINES="-D TIMEX_DOUBLE_BUFFER=1" MACHINE=TC2048 \
-		ZESARUX_FLAGS=--enabletimexvideo run
+run-profile:
+	$(MAKE) OUTDIR=build-profile DEFINES="-D PROFILE_BORDER=1" run
 
 clean:
-	rm -rf build build-timex
+	rm -rf build build-profile build-timex
