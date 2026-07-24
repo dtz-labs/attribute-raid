@@ -5,6 +5,9 @@ renderer and optional AY-3-8912 sound for the Spectrum 128K or a 48K machine
 with an AY interface. All code executed on the Spectrum is well-commented Z80
 assembly; there is no C runtime.
 
+**Status:** `0.1.0` is a beta release. The core gameplay is playable, but level
+progression and final balancing are not complete yet.
+
 V3 deliberately follows the coarse geometry of the Atari 2600 game. The banks
 are built from large stepped segments but still scroll smoothly by one pixel.
 The renderer never copies or scrolls the complete screen bitmap. It updates

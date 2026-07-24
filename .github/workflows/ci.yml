@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-tap:
+    name: build TAP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compile TAP file
+        run: make
+
+      - name: Upload TAP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: attribute-raid-tap
+          path: build/attribute-raid.tap
+          if-no-files-found: error
