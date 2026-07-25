@@ -32,7 +32,6 @@ dirty_first_y: db 0
 dirty_y: db 0
 dirty_residues: db 0
 dirty_rows_remaining: db 0
-dirty_delta_ptr: dw 0
 row_block_index: db 0
 row_screen_addr: dw 0
 redraw_y: db 0

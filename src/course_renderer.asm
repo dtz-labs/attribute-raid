@@ -366,11 +366,21 @@ rebuild_block_delta_overflow:
     ld a,255                         ; rare complex block uses old renderer
     ld (block_delta_build_count),a
 store_block_delta_count:
+    ; The count page holds 32 live entries mirrored eight times, so the dirty
+    ; pass can step to the circular predecessor with a bare DEC L and the
+    ; 0 -> 31 wrap costs nothing.
     ld a,(block_delta_build_index)
     ld l,a
     ld h,HIGH(block_delta_count)
     ld a,(block_delta_build_count)
-    ld (hl),a
+    ld c,a
+    ld b,8
+store_block_delta_mirror:
+    ld (hl),c
+    ld a,l
+    add a,32
+    ld l,a
+    djnz store_block_delta_mirror
     ret
 
 get_course_background_byte_indexed:
@@ -746,66 +756,109 @@ render_dirty_rows:
     ld a,(speed_pixels)
     ld (dirty_residues),a
 dirty_residue_loop:
+    ; The hot loop keeps everything in registers: DE walks the scanline base,
+    ; L walks the mirrored delta-count page (H stays on it), so an unchanged
+    ; block costs one count read plus the Y+8 address step. dirty_y and
+    ; row_block_index exist only for the rare full-renderer fallback and are
+    ; reconstructed there from the loop position.
     ld a,(dirty_first_y)
     add a,16                       ; skip the two protected top character rows
-    ld (dirty_y),a
     call get_block_index_for_y
     ld a,l
     ld (row_block_index),a
-    ld c,0
-    call block_delta_address
-    ld (dirty_delta_ptr),hl
-    ld a,(dirty_y)
+    ld a,(dirty_first_y)
+    add a,16
     call calc_screen_line_addr
     ex de,hl                       ; keep the current scanline base in DE
+    ld a,(row_block_index)
+    ld l,a
+    ld h,HIGH(block_delta_count)
     ld a,19                        ; every residue occurs 19 times in 152 rows
     ld (dirty_rows_remaining),a
 dirty_row_loop:
-    call render_v3_row_delta_prepared
+    ld a,(hl)                      ; delta count of this block
+    or a
+    jr nz,dirty_row_changed
+dirty_row_advance:
     ld a,(dirty_rows_remaining)
     dec a
     ld (dirty_rows_remaining),a
     jr z,dirty_next_residue
-
+    dec l                          ; circular predecessor; the mirrored count
+                                   ; page makes the 0 -> 31 wrap free
     ; Y+8 is an incremental Spectrum display-file step. Crossing L=0xe0
-    ; enters the next 64-line third, hence the additional H+=8 on carry.
+    ; enters the next 64-line third, hence the additional D+=8 on carry.
     ld a,e
     add a,32
     ld e,a
-    jr nc,dirty_screen_row_ready
+    jr nc,dirty_row_loop
     ld a,d
     add a,8
     ld d,a
-dirty_screen_row_ready:
-    ld a,(dirty_y)
-    add a,8
+    jr dirty_row_loop
+
+dirty_row_changed:
+    ; The common case is a short precomputed list of bytes which changed from
+    ; block i-1 to i. A complex island transition carries count=255 and falls
+    ; back to the complete edge renderer.
+    cp 255
+    jr z,dirty_row_fallback
+    ld b,a
+    push hl                        ; count-page cursor survives the replay
+    ; Delta slot: block_delta_ops + index*32, four consecutive aligned pages.
+    ld a,l
+    and 31
+    ld c,a
+    and 7
+    rrca
+    rrca
+    rrca                           ; (index & 7) * 32
+    ld l,a
+    ld a,c
+    srl a
+    srl a
+    srl a
+    add a,HIGH(block_delta_ops)
+    ld h,a
+dirty_delta_replay:
+    ld a,(hl)
+    inc hl
+    add a,e
+    ld c,e
+    ld e,a
+    ld a,(hl)
+    ld (de),a
+    inc hl
+    ld e,c
+    djnz dirty_delta_replay
+    pop hl
+    jr dirty_row_advance
+
+dirty_row_fallback:
+    ; Reconstruct the row Y and block index which the fast loop keeps
+    ; implicit, then run the full edge renderer with the registers saved.
+    ld a,(dirty_rows_remaining)
+    ld b,a
+    ld a,19
+    sub b                          ; rows already completed this residue
+    add a,a
+    add a,a
+    add a,a
+    ld c,a
+    ld a,(dirty_first_y)
+    add a,16
+    add a,c
     ld (dirty_y),a
-    ld a,(row_block_index)
-    dec a
+    ld a,l
     and 31
     ld (row_block_index),a
-    cp 31
-    jr z,dirty_delta_ptr_wrapped
+    push de
+    push hl
+    call render_v3_row_indexed
+    pop hl
+    pop de
+    jr dirty_row_advance
 
-    ; Consecutive circular block records are physically 32 bytes apart, even
-    ; across their aligned-page boundary. Keep the pointer instead of calling
-    ; block_delta_address for every one of the nineteen rows.
-    ld hl,(dirty_delta_ptr)
-    ld a,l
-    sub 32
-    ld l,a
-    jr nc,dirty_delta_ptr_ready
-    dec h
-dirty_delta_ptr_ready:
-    ld (dirty_delta_ptr),hl
-    jr dirty_row_loop
-dirty_delta_ptr_wrapped:
-    ; Circular block 31 follows block 0 while the records themselves occupy a
-    ; linear 1KB table. Jump to its final 32-byte slot instead of stepping
-    ; before block_delta_ops.
-    ld hl,block_delta_ops+(31*32)
-    ld (dirty_delta_ptr),hl
-    jr dirty_row_loop
 dirty_next_residue:
     ld a,(dirty_first_y)
     dec a
@@ -814,7 +867,7 @@ dirty_next_residue:
     ld a,(dirty_residues)
     dec a
     ld (dirty_residues),a
-    jr nz,dirty_residue_loop
+    jp nz,dirty_residue_loop
     ret
 
 render_v3_row:
@@ -830,42 +883,6 @@ render_v3_row:
     ld a,l
     ld (row_block_index),a
     jp render_v3_row_indexed
-
-render_v3_row_delta_prepared:
-    ; The common case is a short precomputed list of bytes which changed from
-    ; block i-1 to i. A complex island transition carries count=255 and falls
-    ; back to the complete edge renderer below. DE and dirty_delta_ptr were
-    ; prepared once for this residue, eliminating two address calculations per
-    ; row from the hot path.
-    ld a,(row_block_index)
-    ld l,a
-    ld h,HIGH(block_delta_count)
-    ld a,(hl)
-    cp 255
-    jr z,render_v3_row_delta_fallback
-    or a
-    ret z
-    ld b,a
-    ld hl,(dirty_delta_ptr)
-render_v3_delta_byte:
-    ld a,(hl)
-    inc hl
-    add a,e
-    ld c,e
-    ld e,a
-    ld a,(hl)
-    ld (de),a
-    inc hl
-    ld e,c
-    djnz render_v3_delta_byte
-    ret
-render_v3_row_delta_fallback:
-    ; The indexed renderer freely uses DE; retain the incremental destination
-    ; carried by the surrounding nineteen-row loop.
-    push de
-    call render_v3_row_indexed
-    pop de
-    ret
 
 render_v3_row_indexed:
     ; Dirty rows advance by exactly eight scanlines, so their circular block
