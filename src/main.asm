@@ -1,10 +1,11 @@
-; Attribute Raid renderer V3 for ZX Spectrum 48K.
+; Attribute Raid renderer V3 for ZX Spectrum 48K and Timex Hi-Color.
 ;
 ; The river is deliberately chunky like the Atari 2600 original: one course
-; block is eight world scanlines high and both banks move in four-pixel steps.
+; block is eight world scanlines high. This local experiment keeps that cadence
+; but lets either bank move in one-pixel steps for an Atari 8-bit-like contour.
 ; Scrolling is still pixel-smooth.  Instead of repainting all 192 scanlines,
 ; each frame updates only the rows which cross a block boundary (alternating
-; between zero and 21 rows with the slow modifier, 21 at base speed, and 42
+; between zero and 19 rows with the slow modifier, 19 at base speed, and 38
 ; on the light two-pixel phases of adaptive fast mode). A fork is an optional
 ; land interval inside the river and is handled by the same dirty-row pass.
 ;
@@ -12,14 +13,15 @@
 ; Normal attributes stay fixed; only the bridge's brown cells are updated.
 ;
 ; Vertical screen contract:
-;   Y=0..7     immutable black upper margin
-;   Y=8..15    white-on-black HUD (LIVES, FUEL and SCORE)
-;   Y=16..183  scrolling playfield and all live actors
-;   Y=184..191 black lower margin, hidden from the renderer and bridge
-; The separation is what lets the HUD update only when its contents change.
+;   Y=0..15    immutable black upper margin
+;   Y=16..167  scrolling playfield and all live actors
+;   Y=168..175 LIVES/FUEL/SCORE relocated from the top
+;   Y=176..183 detailed fuel indicator
+;   Y=184..191 static copyright in play, scrolling between games
+; The three bottom rows never belong to the world renderer.
 ;
 ; Coordinate convention: moving XOR objects, including the tank, use pixel X.
-; Bank and bridge geometry remains byte-based because it is always aligned.
+; Bank edges use pixel X; islands and bridges remain byte-aligned.
 ;
 ; Entry point: 32768 (0x8000).
 
@@ -44,13 +46,15 @@ start:
     call update_hud_if_dirty
     call paint_helicopter_attributes
     call paint_fuel_attributes
+    call paint_balloon_attributes
     call paint_tank_attributes
     call draw_entities
+    call show_ready_screen
     ei
 
 main_loop:
-    ; HALT is the only frame synchronisation point. On a 48K Spectrum the ROM
-    ; interrupt wakes us once per 50 Hz display frame.
+    ; HALT is the only frame synchronisation point. The ROM interrupt wakes us
+    ; once per 50 Hz display frame on every supported Spectrum/Timex model.
     xor a
     out (0xfe),a
     halt
@@ -77,12 +81,7 @@ main_loop:
     jr main_loop
 
 main_frame_active:
-    ; XOR removes the old sprites exactly. The broad bridge stays resident;
-    ; update_bridge later changes only the rows entering/leaving its envelope.
-    call restore_entities
-    call restore_helicopter_attributes
-    call restore_fuel_attributes
-    call restore_tank_attributes
+    call restore_frame_entities
 
     ld a,(speed_pixels)
     or a
@@ -96,8 +95,9 @@ advance_frame_samples:
 
     call render_dirty_rows
 course_not_scrolled:
-    ; Entity coordinates are updated only after their old XOR images have been
-    ; removed. Collision therefore sees a clean river/bridge bitmap.
+    ; Standard entities are already absent. Timex keeps its uniform-background
+    ; group resident through most movement, then clears the saved old rectangles
+    ; inside update_entities before bridge writes and bitmap collision tests.
     call update_entities
     call update_hud_if_dirty
     ld a,(crashed)
@@ -105,20 +105,173 @@ course_not_scrolled:
     jr z,draw_updated_entities
     call begin_crash
     call update_hud_if_dirty
-    call paint_helicopter_attributes
-    call paint_fuel_attributes
-    call paint_tank_attributes
-    call paint_crash_attributes
-    call draw_entities
+    call draw_crash_frame_entities
     call profile_end
     jr main_loop
 draw_updated_entities:
+    call draw_frame_entities
+    call profile_end
+    jp main_loop
+
+restore_frame_entities:
+    ld a,TIMEX_HICOLOR
+    or a
+    jr nz,restore_timex_frame_entities
+
+restore_standard_frame_entities:
+    ; The standard ULA path keeps its original, proven ordering: remove the
+    ; XOR bitmaps first, then restore the coarse 8x8 colour cells.
+    call restore_entities
+    call restore_helicopter_attributes
+    call restore_fuel_attributes
+    call restore_balloon_attributes
+    jp restore_tank_attributes
+
+restore_timex_frame_entities:
+    ; Remove only actors which can cross non-uniform terrain. Ships, the
+    ; helicopter, balloon, FUEL and the shore tank remain resident during the
+    ; comparatively expensive river update and are removed just before the
+    ; collision pass by prepare_frame_entity_update.
+    call snapshot_timex_object_attributes
+    call timex_suspend_deferred_entities
+    call restore_entities
+    jp timex_resume_deferred_entities
+
+prepare_frame_entity_update:
+    ld a,TIMEX_HICOLOR
+    or a
+    ret z
+    ; These old rectangles have guaranteed uniform bitmap backgrounds. Restore
+    ; water with literal zeroes and land with literal ones; no XOR pass is used.
+    jp clear_timex_deferred_entities_opaque
+
+prepare_frame_entities_for_bridge:
+    ; A bridge can overwrite a resident water sprite and a later zero-fill would
+    ; cut a hole back into the road. Only bridge/road frames clear the group at
+    ; this earlier point; ordinary frames keep it visible until collision.
+    ld a,TIMEX_HICOLOR
+    or a
+    ret z
+    ld a,(bridge_active)
+    ld b,a
+    ld a,(destroyed_road_active)
+    or b
+    ld b,a
+    ld a,(bridge_spawn_pending)
+    or b
+    ret z
+    call prepare_frame_entity_update
+    ld a,1
+    ld (timex_deferred_cleared),a
+    ld (timex_ships_cleared),a
+    ret
+
+prepare_frame_entities_for_collision:
+    ld a,TIMEX_HICOLOR
+    or a
+    ret z
+    ld a,(timex_deferred_cleared)
+    or a
+    ret nz
+    ; Ships remain resident during projectile tests. Those tests use explicit
+    ; swept rectangles, so no clean bitmap is required for either ship. Only
+    ; the remaining uniform-background actors need removing here.
+    call clear_timex_nonship_entities_opaque
+    ld a,1
+    ld (timex_deferred_cleared),a
+    ret
+
+transition_timex_ships_before_player_collision:
+    ld a,TIMEX_HICOLOR
+    or a
+    ret z
+    ; Bullet and bridge exclusion may deactivate a ship. Apply the top/side
+    ; delta only after those decisions, so a destroyed/relocated old hull is
+    ; cleared once and can never be left resident in the bitmap.
+    call transition_timex_ships_opaque
+    ld a,1
+    ld (timex_ships_drawn),a
+    ret
+
+redraw_timex_deferred_after_collision:
+    ld a,TIMEX_HICOLOR
+    or a
+    ret z
+    ld a,(crashed)
+    or a
+    ret nz
+    ; Ships were already transformed in place for the player collision. Draw
+    ; only the actors whose complete old rectangles had to be restored.
+    call draw_timex_opaque_nonship_entities
+    ld a,1
+    ld (timex_deferred_drawn),a
+    ret
+
+draw_frame_entities:
+    ld a,TIMEX_HICOLOR
+    or a
+    jr nz,draw_timex_frame_entities
+
+draw_standard_frame_entities:
+    ; Standard Spectrum attributes must be ready before XOR drawing, matching
+    ; the renderer used before the Timex anti-flicker optimization.
     call paint_helicopter_attributes
     call paint_fuel_attributes
+    call paint_balloon_attributes
     call paint_tank_attributes
+    jp draw_entities
+
+draw_timex_frame_entities:
+    ; Terrain-crossing actors retain the masked XOR compositor. Actors whose
+    ; placement guarantees plain water/full land use an opaque writer below:
+    ; it stores both zero and one pixels and never performs an additive draw.
+    ld a,(timex_deferred_drawn)
+    or a
+    jr nz,timex_deferred_bitmap_ready
+    call draw_timex_deferred_entities_opaque
+timex_deferred_bitmap_ready:
+    call timex_suspend_deferred_entities
     call draw_entities
-    call profile_end
-    jr main_loop
+    call timex_resume_deferred_entities
+    call paint_helicopter_attributes
+    call paint_fuel_attributes
+    call paint_balloon_attributes
+    call paint_tank_attributes
+    jp cleanup_timex_saved_object_attributes
+
+draw_crash_frame_entities:
+    ld a,TIMEX_HICOLOR
+    or a
+    jr nz,draw_timex_crash_frame_entities
+
+draw_standard_crash_frame_entities:
+    call paint_helicopter_attributes
+    call paint_fuel_attributes
+    call paint_balloon_attributes
+    call paint_tank_attributes
+    call paint_crash_attributes
+    jp draw_entities
+
+draw_timex_crash_frame_entities:
+    ; A normal Timex frame has already transformed its ships in place before a
+    ; player collision can request the crash. Keep those resident silhouettes
+    ; out of the XOR walk; all other actors were removed and must be drawn.
+    ld a,(timex_ships_drawn)
+    or a
+    jr z,draw_timex_crash_all_entities
+    call timex_suspend_ships
+    call draw_entities
+    call timex_resume_ships
+    jr draw_timex_crash_attributes
+draw_timex_crash_all_entities:
+    call draw_entities
+draw_timex_crash_attributes:
+    call paint_helicopter_attributes
+    call paint_fuel_attributes
+    call paint_balloon_attributes
+    call paint_tank_attributes
+    call paint_crash_attributes
+    jp cleanup_timex_saved_object_attributes
 
 
 ; ---------------------------------------------------------------------------
@@ -126,8 +279,12 @@ draw_updated_entities:
 ; ---------------------------------------------------------------------------
 
 init_attributes:
-    ; BRIGHT 1, PAPER blue, INK green in the 21-row playfield. Character row
-    ; zero is blank black, row one is the HUD and row 23 is the lower margin.
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,init_timex_attributes
+
+    ; Standard ULA: two blank rows, nineteen playfield rows and three black
+    ; status rows. Text uses white INK over black PAPER in rows 21..23.
     ld hl,0x5800
     ld (hl),0x4c
     ld de,0x5801
@@ -137,19 +294,53 @@ init_attributes:
     xor a
     ld (hl),a
     ld de,0x5801
-    ld bc,31
+    ld bc,63
     ldir
-    ld hl,0x5820
+    ld hl,0x5aa0
     ld (hl),0x47
-    ld de,0x5821
-    ld bc,31
+    ld de,0x5aa1
+    ld bc,95
     ldir
-    ld hl,0x5ae0
+    ret
+
+init_timex_attributes:
+    ; Timex Extended Color uses one attribute byte per 8x1 bitmap byte. Port
+    ; FF mode 2 selects the second display file at 6000h..77ff as attributes.
+    ld a,2
+    out (0xff),a
+    ld hl,0x6000
+    ld (hl),0x4c
+    ld de,0x6001
+    ld bc,6143
+    ldir
+
     xor a
-    ld (hl),a
-    ld de,0x5ae1
-    ld bc,31
-    ldir
+    ld (timex_attr_y),a
+    ld b,16
+    ld c,0
+init_timex_top_row:
+    push bc
+    ld a,(timex_attr_y)
+    call timex_fill_attribute_scanline
+    ld a,(timex_attr_y)
+    inc a
+    ld (timex_attr_y),a
+    pop bc
+    djnz init_timex_top_row
+
+    ld a,PLAYFIELD_BOTTOM
+    ld (timex_attr_y),a
+    ld b,24
+    ld c,0x47
+init_timex_bottom_row:
+    push bc
+    ld a,(timex_attr_y)
+    call timex_fill_attribute_scanline
+    ld a,(timex_attr_y)
+    inc a
+    ld (timex_attr_y),a
+    pop bc
+    djnz init_timex_bottom_row
     ret
 
 reinitialize_demo:
@@ -167,6 +358,7 @@ reinitialize_demo:
     call update_hud_if_dirty
     call paint_helicopter_attributes
     call paint_fuel_attributes
+    call paint_balloon_attributes
     call paint_tank_attributes
     call draw_entities
     ret
@@ -212,7 +404,7 @@ update_hud_if_dirty:
     or a
     jr nz,update_existing_hud_digits
 
-    ld a,8
+    ld a,168
     ld (hud_clear_y),a
 clear_hud_row:
     ld a,(hud_clear_y)
@@ -227,15 +419,30 @@ clear_hud_row:
     ld a,(hud_clear_y)
     inc a
     ld (hud_clear_y),a
-    cp 16
+    cp 192
     jr nz,clear_hud_row
 
     call update_fuel_meter_text
+    call update_fuel_bar_text
     ld hl,hud_text
     ld b,32
-    ld d,8
+    ld d,168
     ld e,0
     call draw_rom_text
+    ld hl,fuel_bar_text
+    ld b,32
+    ld d,176
+    ld e,0
+    call draw_rom_text
+    ld hl,footer_text
+    ld b,32
+    ld d,184
+    ld e,0
+    call draw_rom_text
+    xor a
+    ld (footer_index),a
+    ld a,8
+    ld (footer_timer),a
     ld a,1
     ld (hud_initialized),a
     xor a
@@ -248,7 +455,7 @@ update_existing_hud_digits:
     jr z,update_hud_score
     ld hl,hud_life_digit
     ld b,1
-    ld d,8
+    ld d,168
     ld e,6
     call draw_rom_text
 update_hud_score:
@@ -268,7 +475,7 @@ update_score_start_column:
     dec e
     dec a
     jr nz,update_score_start_column
-    ld d,8
+    ld d,168
     call draw_rom_text
     xor a
     ld (score_redraw_count),a
@@ -280,8 +487,14 @@ update_hud_fuel:
     call update_fuel_meter_text
     ld hl,fuel_meter_0
     ld b,6
-    ld d,8
+    ld d,168
     ld e,13
+    call draw_rom_text
+    call update_fuel_bar_text
+    ld hl,fuel_bar_0
+    ld b,24
+    ld d,176
+    ld e,7
     jp draw_rom_text
 
 update_fuel_meter_text:
@@ -308,6 +521,73 @@ store_fuel_meter_cell:
     djnz build_fuel_meter_cell
     ret
 
+update_fuel_bar_text:
+    ; Twenty-four cells expose two fuel units each, giving the bottom panel a
+    ; much smoother indicator than the compact six-cell value in the HUD row.
+    ld a,(fuel_level)
+    ld c,a
+    ld hl,fuel_bar_0
+    ld b,24
+build_fuel_bar_cell:
+    ld a,c
+    cp 2
+    jr c,empty_fuel_bar_cell
+    sub 2
+    ld c,a
+    ld a,35                         ; '#': two fuel units
+    jr store_fuel_bar_cell
+empty_fuel_bar_cell:
+    ld c,0
+    ld a,46                         ; '.': empty segment
+store_fuel_bar_cell:
+    ld (hl),a
+    inc hl
+    djnz build_fuel_bar_cell
+    ret
+
+update_footer_scroller:
+    ; Called only by the between-games wait screen. Scroll one whole character
+    ; every eight frames; active gameplay leaves the copyright row untouched.
+    ; Moving the isolated footer costs 248 copied bytes plus one new glyph.
+    ld a,(footer_timer)
+    dec a
+    ld (footer_timer),a
+    ret nz
+    ld a,8
+    ld (footer_timer),a
+    ld a,184
+    ld (footer_row_y),a
+    ld b,8
+scroll_footer_bitmap_row:
+    push bc
+    ld a,(footer_row_y)
+    call calc_screen_line_addr
+    ld d,h
+    ld e,l
+    inc hl
+    ld bc,31
+    ldir
+    ld a,(footer_row_y)
+    inc a
+    ld (footer_row_y),a
+    pop bc
+    djnz scroll_footer_bitmap_row
+
+    ld a,(footer_index)
+    ld l,a
+    ld h,0
+    ld de,footer_text
+    add hl,de
+    ld b,1
+    ld d,184
+    ld e,31
+    call draw_rom_text
+    ld a,(footer_index)
+    inc a
+    and 31
+    ld (footer_index),a
+    ret
+
 paint_helicopter_attributes:
     ; The Atari sprite changes colour by scanline. Spectrum attributes cannot
     ; follow a freely moving 10-pixel object that closely, so use a crisp white
@@ -327,6 +607,9 @@ restore_helicopter_attributes:
     ld a,0x4c
 prepare_helicopter_attributes:
     ld (object_attr_value),a
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,prepare_timex_helicopter_attributes
     ld a,(helicopter_x)
     and 7
     ld a,2
@@ -362,13 +645,35 @@ helicopter_attr_rows_ready:
     ld (object_attr_rows),a
     jp paint_object_attribute_cells
 
+prepare_timex_helicopter_attributes:
+    ld a,(helicopter_x)
+    and 7
+    ld a,2
+    jr z,timex_helicopter_width_ready
+    inc a
+timex_helicopter_width_ready:
+    ld (object_attr_width),a
+    ld a,(helicopter_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(helicopter_y)
+    ld (object_attr_y),a
+    ld a,10
+    ld (object_attr_rows),a
+    jp timex_paint_object_rows
+
 paint_fuel_attributes:
     ld a,(fuel_active)
     or a
     ret z
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,paint_timex_fuel_attributes
     call prepare_fuel_attribute_geometry
     xor a
-    ld (fuel_attr_phase),a          ; F starts on white
+    ld (fuel_attr_phase),a          ; F/U/E/L bands start at magenta index zero
     ld a,(fuel_y)
     and 7
     cp 4
@@ -399,13 +704,15 @@ store_fuel_attr_repeat:
     ld de,32
 paint_next_fuel_attribute:
     ld a,(object_attr_row)
-    cp 23
+    cp 21
     ret nc
     ld a,(fuel_attr_phase)
-    or a
-    ld a,0x4f                       ; BRIGHT white body over blue cut-outs
-    jr z,fuel_attribute_value_ready
-    ld a,0x4b                       ; BRIGHT magenta body over blue cut-outs
+    and 1
+    jr z,fuel_attribute_magenta
+    ld a,0x4f                       ; U/L: BRIGHT white over blue cut-outs
+    jr fuel_attribute_value_ready
+fuel_attribute_magenta:
+    ld a,0x4b                       ; F/E: BRIGHT magenta over blue cut-outs
 fuel_attribute_value_ready:
     ld (hl),a
     add hl,de
@@ -418,13 +725,14 @@ fuel_attribute_value_ready:
     ret z
     ld a,(fuel_attr_repeat)
     or a
-    jr z,toggle_fuel_attr_phase
+    jr z,advance_fuel_attr_phase
     xor a                           ; repeat F colour across a late boundary
     ld (fuel_attr_repeat),a
     jr paint_next_fuel_attribute
-toggle_fuel_attr_phase:
+advance_fuel_attr_phase:
     ld a,(fuel_attr_phase)
-    xor 1                           ; F/E white, U/L magenta
+    inc a
+    and 3                           ; magenta, white, magenta, white
     ld (fuel_attr_phase),a
     jr paint_next_fuel_attribute
 
@@ -432,12 +740,117 @@ restore_fuel_attributes:
     ld a,(fuel_active)
     or a
     ret z
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,restore_timex_fuel_attributes
     call prepare_fuel_attribute_geometry
     ld a,0x4c                       ; ordinary green land / blue water cells
     ld (object_attr_value),a
     ld a,(fuel_attr_rows_remaining)
     ld (object_attr_rows),a
     jp paint_object_attribute_cells
+
+paint_balloon_attributes:
+    ; The Atari balloon is striped by scanline. Standard Spectrum attributes
+    ; approximate the canopy with yellow/cyan cells and the lower envelope/
+    ; basket with magenta, always retaining the same blue PAPER as the river.
+    ld a,(balloon_active)
+    or a
+    ret z
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,paint_timex_balloon_attributes
+    call prepare_balloon_attribute_geometry
+paint_balloon_attribute_row:
+    ld a,(object_attr_row)
+    cp 21
+    ret nc
+    ld b,a
+    and 7
+    rrca
+    rrca
+    rrca
+    ld l,a
+    ld a,(object_attr_col)
+    add a,l
+    ld l,a
+    ld a,b
+    srl a
+    srl a
+    srl a
+    add a,0x58
+    ld h,a
+
+    ld a,(object_attr_row)
+    add a,a
+    add a,a
+    add a,a
+    add a,4                         ; colour by the cell's vertical midpoint
+    ld b,a
+    ld a,(balloon_y)
+    ld c,a
+    ld a,b
+    sub c
+    jr c,balloon_attribute_yellow
+    cp 4
+    jr c,balloon_attribute_yellow
+    cp 9
+    jr c,balloon_attribute_cyan
+    ld a,0x4b                       ; BRIGHT magenta over blue
+    jr balloon_attribute_ready
+balloon_attribute_yellow:
+    ld a,0x4e                       ; BRIGHT yellow over blue
+    jr balloon_attribute_ready
+balloon_attribute_cyan:
+    ld a,0x4d                       ; BRIGHT cyan over blue
+balloon_attribute_ready:
+    ld (hl),a
+    inc l
+    ld (hl),a
+    ld a,(object_attr_row)
+    inc a
+    ld (object_attr_row),a
+    ld a,(object_attr_rows)
+    dec a
+    ld (object_attr_rows),a
+    jr nz,paint_balloon_attribute_row
+    ret
+
+restore_balloon_attributes:
+    ld a,(balloon_active)
+    or a
+    ret z
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,restore_timex_balloon_attributes
+    call prepare_balloon_attribute_geometry
+    ld a,0x4c                       ; ordinary green land / blue water cells
+    ld (object_attr_value),a
+    jp paint_object_attribute_cells
+
+prepare_balloon_attribute_geometry:
+    ld a,2                          ; byte-aligned 16-pixel balloon
+    ld (object_attr_width),a
+    ld a,(balloon_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(balloon_y)
+    ld b,a
+    srl a
+    srl a
+    srl a
+    ld (object_attr_row),a
+    ld a,b
+    and 7
+    cp 5                            ; 20px uses three cells until offset five
+    ld a,3
+    jr c,balloon_attr_rows_ready
+    inc a
+balloon_attr_rows_ready:
+    ld (object_attr_rows),a
+    ret
 
 paint_tank_attributes:
     ; The shore tank is XORed over set land pixels, so its silhouette consists
@@ -460,6 +873,9 @@ restore_tank_attributes:
     ld a,0x4c                       ; ordinary green land / blue water cells
 prepare_tank_attributes:
     ld (object_attr_value),a
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,prepare_timex_tank_attributes
     ld a,2                          ; byte-aligned 16-pixel tank
     ld (object_attr_width),a
     ld a,(tank_x)
@@ -483,6 +899,20 @@ prepare_tank_attributes:
 tank_attr_rows_ready:
     ld (object_attr_rows),a
     jp paint_object_attribute_cells
+
+prepare_timex_tank_attributes:
+    ld a,2
+    ld (object_attr_width),a
+    ld a,(tank_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(tank_y)
+    ld (object_attr_y),a
+    ld a,10
+    ld (object_attr_rows),a
+    jp timex_paint_object_rows
 
 tank_attributes_overlap_road:
     ; Road attributes already use black PAPER. Leave them under a shore tank
@@ -527,6 +957,22 @@ paint_crash_attributes:
     ; fire. It need not be restored: the next life redraws the whole course.
     ld a,0x4e
     ld (object_attr_value),a
+    ld a,TIMEX_HICOLOR
+    or a
+    jr z,prepare_standard_crash_attributes
+    ld a,3
+    ld (object_attr_width),a
+    ld a,(player_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(player_y)
+    ld (object_attr_y),a
+    ld a,13
+    ld (object_attr_rows),a
+    jp timex_paint_object_rows
+prepare_standard_crash_attributes:
     ld a,3
     ld (object_attr_width),a
     ld (object_attr_rows),a
@@ -558,7 +1004,7 @@ clip_object_attribute_top:
     jr clip_object_attribute_top
 
 prepare_object_attribute_address:
-    cp 23
+    cp 21
     ret nc
     ld b,a
     and 7
@@ -601,10 +1047,236 @@ paint_object_attribute_byte:
     ld (object_attr_rows),a
     ret z
     ld a,(object_attr_row)
-    cp 23
+    cp 21
     ret nc
     add hl,de
     jr paint_object_attribute_row
+
+
+; ---------------------------------------------------------------------------
+; Timex 8x1 attribute helpers
+; ---------------------------------------------------------------------------
+
+timex_attribute_address:
+    ; Input A=screen Y. The Timex attribute has exactly the same interleaved
+    ; address as its bitmap byte, with address bit 13 set.
+    call calc_screen_line_addr
+    ld de,0x2000
+    add hl,de
+    ret
+
+timex_fill_attribute_scanline:
+    ; Input A=screen Y, C=attribute. Used by mode setup and GAME OVER too, so
+    ; this deliberately accepts all 192 physical scanlines.
+    call timex_attribute_address
+    ld b,32
+    ld a,c
+timex_fill_attribute_byte:
+    ld (hl),a
+    inc hl
+    djnz timex_fill_attribute_byte
+    ret
+
+timex_paint_object_rows:
+    ; Exact 8x1 counterpart of paint_object_attribute_cells. Geometry uses a
+    ; pixel Y and a bitmap-byte X/width, so no vertical rounding is involved.
+    ; Calculate the interleaved address once, then advance it directly instead
+    ; of consulting screen_line_table again for every scanline.
+    ld a,(object_attr_rows)
+    or a
+    ret z
+timex_clip_object_top:
+    ld a,(object_attr_y)
+    cp 16
+    jr nc,timex_prepare_object_address
+    inc a
+    ld (object_attr_y),a
+    ld a,(object_attr_rows)
+    dec a
+    ld (object_attr_rows),a
+    ret z
+    jr timex_clip_object_top
+timex_prepare_object_address:
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    call timex_attribute_address
+    ld a,(object_attr_col)
+    add a,l
+    ld l,a
+timex_paint_object_row:
+    ld a,(object_attr_width)
+    ld b,a
+    ld c,a
+    ld a,(object_attr_value)
+timex_paint_object_byte:
+    ld (hl),a
+    inc l
+    djnz timex_paint_object_byte
+    ld a,l
+    sub c
+    ld l,a
+timex_advance_object_row:
+    ld a,(object_attr_y)
+    inc a
+    ld (object_attr_y),a
+    ld a,(object_attr_rows)
+    dec a
+    ld (object_attr_rows),a
+    ret z
+    ld a,(object_attr_y)
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    call timex_next_attribute_row
+    jr timex_paint_object_row
+
+timex_next_attribute_row:
+    ; Input/output HL=the same byte column on adjacent Timex attribute lines.
+    ; Spectrum display memory advances H inside an 8-line character band;
+    ; crossing its last line advances L by 32 and folds H to the next band.
+    ld a,h
+    and 7
+    cp 7
+    jr z,timex_next_attribute_band
+    inc h
+    ret
+timex_next_attribute_band:
+    ld a,l
+    add a,32
+    ld l,a
+    jr c,timex_next_attribute_third
+    ld a,h
+    sub 7
+    ld h,a
+    ret
+timex_next_attribute_third:
+    inc h
+    ret
+
+prepare_timex_fuel_geometry:
+    ld a,1
+    ld (object_attr_width),a
+    ld a,(fuel_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(fuel_y)
+    ld (object_attr_y),a
+    ld a,32
+    ld (object_attr_rows),a
+    ret
+
+restore_timex_fuel_attributes:
+    call prepare_timex_fuel_geometry
+    ld a,0x4c
+    ld (object_attr_value),a
+    jp timex_paint_object_rows
+
+paint_timex_fuel_attributes:
+    call prepare_timex_fuel_geometry
+    xor a
+    ld (fuel_attr_phase),a
+    ld a,8
+    ld (fuel_attr_repeat),a
+    ld a,(object_attr_y)
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    call timex_attribute_address
+    ld a,(object_attr_col)
+    add a,l
+    ld l,a
+paint_timex_fuel_row:
+    ld a,(fuel_attr_phase)
+    and 1
+    ld a,0x4f                       ; U/L white
+    jr nz,timex_fuel_color_ready
+    ld a,0x4b                       ; F/E magenta
+timex_fuel_color_ready:
+    ld (hl),a
+    ld a,(object_attr_y)
+    inc a
+    ld (object_attr_y),a
+    ld a,(object_attr_rows)
+    dec a
+    ld (object_attr_rows),a
+    ret z
+    ld a,(object_attr_y)
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    call timex_next_attribute_row
+    ld a,(fuel_attr_repeat)
+    dec a
+    ld (fuel_attr_repeat),a
+    jr nz,paint_timex_fuel_row
+    ld a,8
+    ld (fuel_attr_repeat),a
+    ld a,(fuel_attr_phase)
+    inc a
+    and 3
+    ld (fuel_attr_phase),a
+    jr paint_timex_fuel_row
+
+prepare_timex_balloon_geometry:
+    ld a,2
+    ld (object_attr_width),a
+    ld a,(balloon_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(balloon_y)
+    ld (object_attr_y),a
+    ld a,20
+    ld (object_attr_rows),a
+    ret
+
+restore_timex_balloon_attributes:
+    call prepare_timex_balloon_geometry
+    ld a,0x4c
+    ld (object_attr_value),a
+    jp timex_paint_object_rows
+
+paint_timex_balloon_attributes:
+    call prepare_timex_balloon_geometry
+    xor a
+    ld (timex_color_phase),a
+    ld a,(object_attr_y)
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    call timex_attribute_address
+    ld a,(object_attr_col)
+    add a,l
+    ld l,a
+paint_timex_balloon_row:
+    ld a,(timex_color_phase)
+    cp 4
+    ld a,0x4e                       ; yellow crown
+    jr c,timex_balloon_color_ready
+    ld a,(timex_color_phase)
+    cp 9
+    ld a,0x4d                       ; cyan middle stripe
+    jr c,timex_balloon_color_ready
+    ld a,0x4b                       ; magenta lower canopy, ropes and basket
+timex_balloon_color_ready:
+    ld (hl),a
+    inc l
+    ld (hl),a
+    dec l
+    ld a,(timex_color_phase)
+    inc a
+    ld (timex_color_phase),a
+    ld a,(object_attr_y)
+    inc a
+    ld (object_attr_y),a
+    ld a,(object_attr_rows)
+    dec a
+    ld (object_attr_rows),a
+    ret z
+    ld a,(object_attr_y)
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    call timex_next_attribute_row
+    jr paint_timex_balloon_row
 
 
 ; ---------------------------------------------------------------------------
@@ -622,6 +1294,14 @@ paint_object_attribute_byte:
 init_shifted_sprites:
     ld hl,player_jet_sprite
     ld de,player_shift_data
+    ld b,13
+    call build_shifted_sprite
+    ld hl,player_jet_left_sprite
+    ld de,player_left_shift_data
+    ld b,13
+    call build_shifted_sprite
+    ld hl,player_jet_right_sprite
+    ld de,player_right_shift_data
     ld b,13
     call build_shifted_sprite
     ld hl,enemy_plane_sprite
@@ -731,14 +1411,15 @@ build_shift_store:
 ;   optional island left/right byte columns (255 = no island)
 
 init_course:
-    ld a,32
-    ld (gen_center_q),a
-    ld a,19
-    ld (gen_half_q),a
+    ld a,128
+    ld (gen_center_x),a
+    ld a,76
+    ld (gen_half_x),a
     xor a
     ld (center_step),a
-    ld (half_step),a
     ld (motion_timer),a
+    ld a,254                        ; begin by narrowing two pixels per block
+    ld (half_step),a
     ld a,0xa7
     ld (lfsr),a
 
@@ -785,102 +1466,130 @@ generate_next_block:
 generate_block:
     call update_course_motion
 
-    ld a,(gen_center_q)
+    ld a,(gen_center_x)
     ld b,a
     ld a,(center_step)
     add a,b
-    cp 25
-    jr nc,center_q_not_low
-    ld a,25
-    ld b,1
-    ld a,b
-    ld (center_step),a
-    ld a,25
-    jr center_q_ready
-center_q_not_low:
-    cp 40
-    jr c,center_q_ready
-    ld a,39
-    ld b,255
-    ld a,b
-    ld (center_step),a
-    ld a,39
-center_q_ready:
-    ld (gen_center_q),a
+    ld (gen_center_x),a
 
-    ld a,(gen_half_q)
+    ld a,(gen_half_x)
     ld b,a
     ld a,(half_step)
     add a,b
-    cp 15
-    jr nc,half_q_not_low
-    ; Brief 120-pixel narrows remain wide enough for a 32-pixel ship in either
-    ; branch of the largest fork. Reverse immediately at the lower bound.
-    ld a,15
-    ld (gen_half_q),a
+    cp 36
+    jr nc,half_x_not_low
+    ; The ordinary river may briefly narrow to 72 pixels. Fork generation
+    ; waits for more room, so both lanes can still accept the wide ship.
+    ld a,36
+    ld (gen_half_x),a
+    ld a,2
+    ld (half_step),a
+    jr half_x_ready
+half_x_not_low:
+    cp 113
+    jr c,store_half_x
+    ; At 224 pixels of water only a 16-pixel bank remains on either side:
+    ; visibly near-full-screen, but still wide enough to hold a shore tank.
+    ld a,112
+    ld (gen_half_x),a
+    ld a,254
+    ld (half_step),a
+    jr half_x_ready
+store_half_x:
+    ld (gen_half_x),a
+half_x_ready:
+
+    ; Wide water has less horizontal room to meander. Clamp the centre from
+    ; the current half-width so neither edge can leave the 16-pixel land guard.
+    ld a,(gen_half_x)
+    add a,16
+    ld c,a                          ; minimum centre = half-width + 16
+    ld a,(gen_center_x)
+    cp c
+    jr nc,center_x_not_low
+    ld a,c
+    ld (gen_center_x),a
     ld a,1
-    ld (half_step),a
-    jr half_q_ready
-half_q_not_low:
-    cp 22
-    jr c,store_half_q
-    ld a,21
-    ld (gen_half_q),a
+    ld (center_step),a
+center_x_not_low:
+    ld a,(gen_half_x)
+    ld b,a
+    ld a,240
+    sub b
+    ld c,a                          ; maximum centre = 240 - half-width
+    ld a,(gen_center_x)
+    cp c
+    jr c,center_x_ready
+    jr z,center_x_ready
+    ld a,c
+    ld (gen_center_x),a
     ld a,255
-    ld (half_step),a
-    jr half_q_ready
-store_half_q:
-    ld (gen_half_q),a
-half_q_ready:
+    ld (center_step),a
+center_x_ready:
 
     call update_course_feature
 
-    ; Convert four-pixel units to byte columns and one of two edge masks.
-    ld a,(course_block_head)
-    ld e,a
-    ld a,(gen_center_q)
+    ; Convert exact pixel edges to a byte column and one of eight masks. The
+    ; old half-byte-only representation was what made every bend look boxed.
+    ld a,(gen_center_x)
     ld b,a
-    ld a,(gen_half_q)
+    ld a,(gen_half_x)
     ld c,a
 
     ld a,b
     sub c
     ld d,a
     srl a
+    srl a
+    srl a
+    ld b,a
+    ld a,(course_block_head)
+    ld l,a
     ld h,HIGH(block_left_col)
-    ld l,e
-    ld (hl),a
+    ld (hl),b
     ld a,d
-    and 1
-    jr z,generated_left_on_byte
-    ld a,0xf0
-    jr store_generated_left_mask
-generated_left_on_byte:
-    xor a
-store_generated_left_mask:
+    and 7
+    ld e,a
+    ld d,0
+    ld hl,left_edge_masks
+    add hl,de
+    ld b,(hl)
+    ld a,(course_block_head)
+    ld l,a
     ld h,HIGH(block_left_mask)
-    ld l,e
+    ld a,b
     ld (hl),a
 
+    ld a,(gen_center_x)
+    ld b,a
+    ld a,(gen_half_x)
+    ld c,a
     ld a,b
     add a,c
     ld d,a
     srl a
+    srl a
+    srl a
+    ld b,a
+    ld a,(course_block_head)
+    ld l,a
     ld h,HIGH(block_right_col)
-    ld l,e
-    ld (hl),a
+    ld (hl),b
     ld a,d
-    and 1
-    jr z,generated_right_on_byte
-    ld a,0x0f
-    jr store_generated_right_mask
-generated_right_on_byte:
-    ld a,255
-store_generated_right_mask:
+    and 7
+    ld e,a
+    ld d,0
+    ld hl,right_edge_masks
+    add hl,de
+    ld b,(hl)
+    ld a,(course_block_head)
+    ld l,a
     ld h,HIGH(block_right_mask)
-    ld l,e
+    ld a,b
     ld (hl),a
 
+    ld a,(course_block_head)
+    ld e,a
     ld a,(generated_island_left)
     ld h,HIGH(block_island_left)
     ld l,e
@@ -901,24 +1610,19 @@ update_course_motion:
 pick_course_motion:
     call lfsr_next
     ld b,a
-    ; Atari-style course runs: one descriptor normally remains active for
-    ; 5..12 blocks (40..96 scanlines), so long straights and diagonals are
-    ; much more common than nervous, constantly changing banks.
-    and 7
-    add a,4
+    ; Keep a bend for 4..7 blocks (32..56 scanlines): less nervous than the
+    ; first jagged experiment, but with much more shape than long near-lines.
+    and 3
+    add a,3
     ld (motion_timer),a
     ld a,b
     and 15
-    add a,a
     ld e,a
     ld d,0
-    ld hl,block_motion_table
+    ld hl,center_motion_table
     add hl,de
     ld a,(hl)
     ld (center_step),a
-    inc hl
-    ld a,(hl)
-    ld (half_step),a
     ret
 
 lfsr_next:
@@ -951,9 +1655,18 @@ update_course_feature:
     ld a,(next_feature)
     or a
     jr nz,generate_bridge_feature
+    ld a,(gen_half_x)
+    cp 56
+    jr nc,generate_fork_feature
+    ld a,4                          ; retry once the narrowing phase has turned
+    ld (feature_countdown),a
+    ret
+generate_fork_feature:
     ld a,1
     ld (next_feature),a
     ld (fork_step),a
+    ld a,2                          ; a fork always opens into safe wide lanes
+    ld (half_step),a
     jr generate_fork_block
 
 generate_bridge_feature:
@@ -967,7 +1680,9 @@ generate_bridge_feature:
 
 generate_fork_block:
     ; The island grows 1,2,3,4 bytes, stays broad, then tapers symmetrically.
-    ld a,(gen_center_q)
+    ld a,(gen_center_x)
+    srl a
+    srl a
     srl a
     ld b,a
     ld a,(fork_step)
@@ -1007,8 +1722,8 @@ store_fork_step:
 
 full_redraw:
     ; Clear everything first, including stale sprites and text from a previous
-    ; life. The loop below deliberately reconstructs only playfield Y=16..183;
-    ; update_hud_if_dirty owns Y=8..15; rows zero and 23 stay black.
+    ; life. The loop below deliberately reconstructs only playfield Y=16..167;
+    ; rows 0..15 stay black and update_hud_if_dirty owns Y=168..191.
     ld hl,0x4000
     xor a
     ld (hl),a
@@ -1016,7 +1731,7 @@ full_redraw:
     ld bc,6143
     ldir
 
-    ld a,16                      ; first scanline below the HUD
+    ld a,16                      ; first scanline below the upper black margin
     ld (redraw_y),a
 full_redraw_row:
     ld a,(redraw_y)
@@ -1024,7 +1739,7 @@ full_redraw_row:
     ld a,(redraw_y)
     inc a
     ld (redraw_y),a
-    cp 184                       ; first scanline of the lower margin
+    cp PLAYFIELD_BOTTOM                       ; first scanline of the lower margin
     jr nz,full_redraw_row
     ret
 
@@ -1034,7 +1749,7 @@ render_full_world_row:
     ; for startup and rows which a road/bridge operation cleared completely.
     cp 16
     ret c
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret nc
     ld (dirty_y),a
     call calc_screen_line_addr
@@ -1140,8 +1855,8 @@ full_island_bytes:
 ;
 ;     (course_phase - y) & 7 < s
 ;
-; The matching residues are enumerated directly. HUD and lower margin rows are
-; excluded, so no full-screen scan is needed.
+; The matching residues are enumerated directly. Upper margin and status-panel
+; rows are excluded, so no full-screen scan is needed.
 
 render_dirty_rows:
     ; One residue class modulo eight changes for each scrolled pixel. At fast
@@ -1161,7 +1876,7 @@ dirty_row_loop:
     call render_v3_row_indexed
     ld a,(dirty_y)
     add a,8
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr nc,dirty_next_residue
     ld (dirty_y),a
     ld a,(row_block_index)
@@ -1181,12 +1896,12 @@ dirty_next_residue:
     ret
 
 render_v3_row:
-    ; Bridge repair and the dirty pass share this entry, so enforce the HUD and
-    ; lower-margin ownership here as a final safety net.
+    ; Bridge repair and the dirty pass share this entry, so enforce upper-margin
+    ; and bottom-panel ownership here as a final safety net.
     ld a,(dirty_y)
     cp 16
     ret c
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret nc
     ld a,(dirty_y)
     call get_block_index_for_y
@@ -1200,7 +1915,7 @@ render_v3_row_indexed:
     ld a,(dirty_y)
     cp 16
     ret c
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret nc
     call calc_screen_line_addr
     ld (row_screen_addr),hl
@@ -1573,15 +2288,17 @@ screen_table_page_ready:
 ;
 ; The original Atari object data is eight bits wide and displayed doubled in
 ; X. Most tables below preserve that 2:1 pixel shape as 16-pixel Spectrum
-; sprites; the ships use a separate 32-pixel cache. Every moving object is
-; erased before the river update and redrawn afterwards. The player is also
-; included so collision and steering may safely alter the background under it.
+; sprites; the ships use a separate 32-pixel cache. The standard build erases
+; every moving object before the river update. The Timex build removes actors
+; which cross complex terrain first, but keeps uniform-water/land actors on
+; screen until just before movement and collision; its redraw stores complete
+; zero/one rows for that deferred group.
 
 init_entities:
-    ; All spawn Y values lie inside the 168-line playfield. River-bound actors
+    ; All spawn Y values lie inside the 152-line playfield. River-bound actors
     ; ask the current course sample for a safe X; the crossing aircraft is the
     ; exception because it intentionally flies over water and land.
-    ld a,170
+    ld a,PLAYFIELD_BOTTOM-14
     ld (player_y),a
     call calc_safe_river_x
     ld (player_x),a
@@ -1632,7 +2349,7 @@ init_entities:
     ld a,140
     ld (helicopter_delay),a
 
-    ld a,16                          ; inactive depot will enter below the HUD
+    ld a,16                          ; inactive depot waits above the playfield
     ld (fuel_y),a
     call calc_safe_river_x
     and 0xf8                         ; vertical FUEL occupies one bitmap byte
@@ -1647,6 +2364,16 @@ init_entities:
     ld (fuel_level),a
     ld a,32
     ld (fuel_consume_timer),a
+
+    ld a,16                          ; static balloon waits at the playfield top
+    ld (balloon_y),a
+    call calc_safe_river_x
+    and 0xf8
+    ld (balloon_x),a
+    xor a
+    ld (balloon_active),a
+    ld a,120                         ; first balloon appears after a short gap
+    ld (balloon_delay),a
 
     ld a,16                          ; first shore tank enters with the scenery
     ld (tank_y),a
@@ -1674,6 +2401,7 @@ init_entities:
     ld (bridge_active),a
     ld (destroyed_road_active),a
     ld (player_move),a
+    ld (player_bank),a
     ld (bullet_active),a
     ld (fire_pending),a
     ld (fire_down),a
@@ -1690,6 +2418,680 @@ init_entities:
     ld (requested_speed),a
     ld (speed_pixels),a
     ret
+
+snapshot_timex_object_attributes:
+    ; Save old bitmap/attribute geometry. Timex keeps this group resident while
+    ; coordinates change, so delayed direct clearing must not read the new state.
+    ld a,(ship0_active)
+    ld (timex_bitmap_ship0_active),a
+    ld a,(ship0_x)
+    ld (timex_bitmap_ship0_x),a
+    ld a,(ship0_y)
+    ld (timex_bitmap_ship0_y),a
+    ld a,(ship1_active)
+    ld (timex_bitmap_ship1_active),a
+    ld a,(ship1_x)
+    ld (timex_bitmap_ship1_x),a
+    ld a,(ship1_y)
+    ld (timex_bitmap_ship1_y),a
+    ld a,(helicopter_active)
+    ld (timex_attr_helicopter_active),a
+    ld a,(helicopter_x)
+    ld (timex_attr_helicopter_x),a
+    ld a,(helicopter_y)
+    ld (timex_attr_helicopter_y),a
+    ld a,(fuel_active)
+    ld (timex_attr_fuel_active),a
+    ld a,(fuel_x)
+    ld (timex_attr_fuel_x),a
+    ld a,(fuel_y)
+    ld (timex_attr_fuel_y),a
+    ld a,(balloon_active)
+    ld (timex_attr_balloon_active),a
+    ld a,(balloon_x)
+    ld (timex_attr_balloon_x),a
+    ld a,(balloon_y)
+    ld (timex_attr_balloon_y),a
+    ld a,(tank_active)
+    ld (timex_attr_tank_active),a
+    ld a,(tank_x)
+    ld (timex_attr_tank_x),a
+    ld a,(tank_y)
+    ld (timex_attr_tank_y),a
+    xor a
+    ld (timex_deferred_cleared),a
+    ld (timex_deferred_drawn),a
+    ld (timex_ships_cleared),a
+    ld (timex_ships_drawn),a
+    ret
+
+cleanup_timex_saved_object_attributes:
+    ; Current colours have already been painted. Clear only the part of each
+    ; old footprint which is no longer covered by the new rectangle; clearing
+    ; the whole old rectangle here would briefly turn the moving sprite green.
+    ld a,0x4c
+    ld (object_attr_value),a
+    call cleanup_timex_saved_helicopter_attributes
+    call cleanup_timex_saved_fuel_attributes
+    call cleanup_timex_saved_balloon_attributes
+    jp cleanup_timex_saved_tank_attributes
+
+cleanup_timex_saved_helicopter_attributes:
+    ld a,(timex_attr_helicopter_active)
+    or a
+    ret z
+    ld a,10
+    ld (object_attr_rows),a
+    ld a,(helicopter_active)
+    or a
+    jr z,cleanup_timex_helicopter_vertical
+    ld a,(helicopter_y)
+    ld b,a
+    ld a,(timex_attr_helicopter_y)
+    ld c,a
+    ld a,b
+    sub c
+    jr c,cleanup_timex_helicopter_full_height
+    jr z,cleanup_timex_helicopter_horizontal
+    cp 10
+    jr nc,cleanup_timex_helicopter_full_height
+    ld (object_attr_rows),a
+    jr cleanup_timex_helicopter_vertical
+cleanup_timex_helicopter_full_height:
+    ld a,10
+    ld (object_attr_rows),a
+cleanup_timex_helicopter_vertical:
+    ld a,(timex_attr_helicopter_x)
+    and 7
+    ld a,2
+    jr z,cleanup_timex_helicopter_width_ready
+    inc a
+cleanup_timex_helicopter_width_ready:
+    ld (object_attr_width),a
+    ld a,(timex_attr_helicopter_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(timex_attr_helicopter_y)
+    ld (object_attr_y),a
+    call timex_paint_object_rows
+    ld a,(helicopter_active)
+    or a
+    ret z
+
+cleanup_timex_helicopter_horizontal:
+    ; A one-pixel rightward patrol crosses at most one byte boundary. The new
+    ; shifted rectangle then starts one byte later, so clear that old column.
+    ld a,(timex_attr_helicopter_x)
+    srl a
+    srl a
+    srl a
+    ld b,a
+    ld a,(helicopter_x)
+    srl a
+    srl a
+    srl a
+    cp b
+    ret c
+    ret z
+    sub b
+    ld (object_attr_width),a
+    ld a,b
+    ld (object_attr_col),a
+    ld a,(timex_attr_helicopter_y)
+    ld (object_attr_y),a
+    ld a,10
+    ld (object_attr_rows),a
+    jp timex_paint_object_rows
+
+cleanup_timex_saved_fuel_attributes:
+    ld a,(timex_attr_fuel_active)
+    or a
+    ret z
+    ld a,32
+    ld (object_attr_rows),a
+    ld a,(timex_attr_fuel_active)
+    or a
+    jr z,cleanup_timex_fuel_rect
+    ld a,(fuel_y)
+    ld b,a
+    ld a,(timex_attr_fuel_y)
+    ld c,a
+    ld a,b
+    sub c
+    ret z
+    jr c,cleanup_timex_fuel_full_height
+    cp 32
+    jr nc,cleanup_timex_fuel_full_height
+    ld (object_attr_rows),a
+    jr cleanup_timex_fuel_rect
+cleanup_timex_fuel_full_height:
+    ld a,32
+    ld (object_attr_rows),a
+cleanup_timex_fuel_rect:
+    ld a,1
+    ld (object_attr_width),a
+    ld a,(timex_attr_fuel_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(timex_attr_fuel_y)
+    ld (object_attr_y),a
+    jp timex_paint_object_rows
+
+cleanup_timex_saved_balloon_attributes:
+    ld a,(timex_attr_balloon_active)
+    or a
+    ret z
+    ld a,20
+    ld (object_attr_rows),a
+    ld a,(balloon_active)
+    or a
+    jr z,cleanup_timex_balloon_rect
+    ld a,(balloon_y)
+    ld b,a
+    ld a,(timex_attr_balloon_y)
+    ld c,a
+    ld a,b
+    sub c
+    ret z
+    jr c,cleanup_timex_balloon_full_height
+    cp 20
+    jr nc,cleanup_timex_balloon_full_height
+    ld (object_attr_rows),a
+    jr cleanup_timex_balloon_rect
+cleanup_timex_balloon_full_height:
+    ld a,20
+    ld (object_attr_rows),a
+cleanup_timex_balloon_rect:
+    ld a,2
+    ld (object_attr_width),a
+    ld a,(timex_attr_balloon_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(timex_attr_balloon_y)
+    ld (object_attr_y),a
+    jp timex_paint_object_rows
+
+cleanup_timex_saved_tank_attributes:
+    ld a,(timex_attr_tank_active)
+    or a
+    ret z
+
+    ; Preserve road colours when the shore tank's old world line overlaps an
+    ; intact or destroyed bridge approach.
+    xor a
+    ld (timex_attr_cleanup_overlap),a
+    ld a,(tank_y)
+    push af
+    ld a,(timex_attr_tank_y)
+    ld (tank_y),a
+    call tank_attributes_overlap_road
+    jr z,cleanup_timex_tank_not_road
+    ld a,1
+    ld (timex_attr_cleanup_overlap),a
+cleanup_timex_tank_not_road:
+    pop af
+    ld (tank_y),a
+    ld a,(timex_attr_cleanup_overlap)
+    or a
+    ret nz
+
+    ld a,10
+    ld (object_attr_rows),a
+    ld a,(tank_active)
+    or a
+    jr z,cleanup_timex_tank_rect
+    ld a,(tank_y)
+    ld b,a
+    ld a,(timex_attr_tank_y)
+    ld c,a
+    ld a,b
+    sub c
+    ret z
+    jr c,cleanup_timex_tank_full_height
+    cp 10
+    jr nc,cleanup_timex_tank_full_height
+    ld (object_attr_rows),a
+    jr cleanup_timex_tank_rect
+cleanup_timex_tank_full_height:
+    ld a,10
+    ld (object_attr_rows),a
+cleanup_timex_tank_rect:
+    ld a,2
+    ld (object_attr_width),a
+    ld a,(timex_attr_tank_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+    ld a,(timex_attr_tank_y)
+    ld (object_attr_y),a
+    jp timex_paint_object_rows
+
+timex_suspend_deferred_entities:
+    ; Preserve the actors which are safe to leave over the incremental terrain
+    ; pass, then make the shared XOR walker skip them.
+    ld a,(ship0_active)
+    ld (timex_saved_ship0_active),a
+    ld a,(ship1_active)
+    ld (timex_saved_ship1_active),a
+    ld a,(balloon_active)
+    ld (timex_saved_balloon_active),a
+    ld a,(fuel_active)
+    ld (timex_saved_fuel_active),a
+    ld a,(helicopter_active)
+    ld (timex_saved_helicopter_active),a
+    ld a,(tank_active)
+    ld (timex_saved_tank_active),a
+    xor a
+    ld (ship0_active),a
+    ld (ship1_active),a
+    ld (balloon_active),a
+    ld (fuel_active),a
+    ld (helicopter_active),a
+    ld (tank_active),a
+    ret
+
+timex_resume_deferred_entities:
+    ld a,(timex_saved_ship0_active)
+    ld (ship0_active),a
+    ld a,(timex_saved_ship1_active)
+    ld (ship1_active),a
+    ld a,(timex_saved_balloon_active)
+    ld (balloon_active),a
+    ld a,(timex_saved_fuel_active)
+    ld (fuel_active),a
+    ld a,(timex_saved_helicopter_active)
+    ld (helicopter_active),a
+    ld a,(timex_saved_tank_active)
+    ld (tank_active),a
+    ret
+
+timex_suspend_ships:
+    ld a,(ship0_active)
+    ld (timex_saved_ship0_active),a
+    ld a,(ship1_active)
+    ld (timex_saved_ship1_active),a
+    xor a
+    ld (ship0_active),a
+    ld (ship1_active),a
+    ret
+
+timex_resume_ships:
+    ld a,(timex_saved_ship0_active)
+    ld (ship0_active),a
+    ld a,(timex_saved_ship1_active)
+    ld (ship1_active),a
+    ret
+
+clear_timex_deferred_entities_opaque:
+    ; Restore the old uniform backgrounds directly. These writes deliberately
+    ; include every zero/one in the rectangle rather than toggling sprite bits.
+    ld a,(timex_bitmap_ship0_active)
+    or a
+    jr z,clear_timex_opaque_ship1
+    ld a,(timex_bitmap_ship0_x)
+    ld c,a
+    and 7
+    ld d,4
+    jr z,clear_timex_ship0_width_ready
+    inc d
+clear_timex_ship0_width_ready:
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(timex_bitmap_ship0_y)
+    ld b,8
+    ld e,0
+    call fill_uniform_sprite_rect
+
+clear_timex_opaque_ship1:
+    ld a,(timex_bitmap_ship1_active)
+    or a
+    jr z,clear_timex_opaque_balloon
+    ld a,(timex_bitmap_ship1_x)
+    ld c,a
+    and 7
+    ld d,4
+    jr z,clear_timex_ship1_width_ready
+    inc d
+clear_timex_ship1_width_ready:
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(timex_bitmap_ship1_y)
+    ld b,8
+    ld e,0
+    call fill_uniform_sprite_rect
+
+clear_timex_nonship_entities_opaque:
+clear_timex_opaque_balloon:
+    ld a,(timex_attr_balloon_active)
+    or a
+    jr z,clear_timex_opaque_fuel
+    ld a,(timex_attr_balloon_x)
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(timex_attr_balloon_y)
+    ld b,20
+    ld d,2
+    ld e,0
+    call fill_uniform_sprite_rect
+
+clear_timex_opaque_fuel:
+    ld a,(timex_attr_fuel_active)
+    or a
+    jr z,clear_timex_opaque_helicopter
+    ld a,(timex_attr_fuel_x)
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(timex_attr_fuel_y)
+    ld b,32
+    ld d,1
+    ld e,0
+    call fill_uniform_sprite_rect
+
+clear_timex_opaque_helicopter:
+    ld a,(timex_attr_helicopter_active)
+    or a
+    jr z,clear_timex_opaque_tank
+    ld a,(timex_attr_helicopter_x)
+    ld c,a
+    and 7
+    ld d,2
+    jr z,clear_timex_helicopter_width_ready
+    inc d
+clear_timex_helicopter_width_ready:
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(timex_attr_helicopter_y)
+    ld b,10
+    ld e,0
+    call fill_uniform_sprite_rect
+
+clear_timex_opaque_tank:
+    ld a,(timex_attr_tank_active)
+    or a
+    ret z
+    ld a,(timex_attr_tank_x)
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(timex_attr_tank_y)
+    ld b,10
+    ld d,2
+    ld e,255
+    jp fill_uniform_sprite_rect
+
+transition_timex_ships_opaque:
+    ; On ordinary frames the old ships are still resident. Restore only rows
+    ; and byte columns which leave their old bounding boxes, then overwrite the
+    ; complete new shapes. Bridge frames already cleared them before road work.
+    ld a,(timex_ships_cleared)
+    or a
+    jp nz,draw_timex_current_ships
+    call cleanup_timex_ship0_bitmap_delta
+    call cleanup_timex_ship1_bitmap_delta
+    jp draw_timex_current_ships
+
+cleanup_timex_ship0_bitmap_delta:
+    ld a,(timex_bitmap_ship0_active)
+    or a
+    ret z
+    call prepare_timex_ship0_old_rect
+    ld a,(ship0_active)
+    or a
+    jr z,cleanup_timex_ship0_full
+    ld a,(ship0_y)
+    ld b,a
+    ld a,(timex_bitmap_ship0_y)
+    ld c,a
+    ld a,b
+    sub c
+    ret z
+    jr c,cleanup_timex_ship0_full
+    cp 8
+    jr nc,cleanup_timex_ship0_full
+    ld b,a
+    jr cleanup_timex_ship0_rows
+cleanup_timex_ship0_full:
+    ld b,8
+cleanup_timex_ship0_rows:
+    ld a,(timex_bitmap_ship0_y)
+    push af
+    ld a,(sprite_transition_old_col)
+    ld c,a
+    ld a,(sprite_transition_old_width)
+    ld d,a
+    pop af
+    ld e,0
+    jp fill_uniform_sprite_rect
+
+prepare_timex_ship0_old_rect:
+    ld a,(timex_bitmap_ship0_x)
+    ld c,a
+    and 7
+    ld a,4
+    jr z,prepare_timex_ship0_width_ready
+    inc a
+prepare_timex_ship0_width_ready:
+    ld (sprite_transition_old_width),a
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld (sprite_transition_old_col),a
+    ret
+
+cleanup_timex_ship1_bitmap_delta:
+    ld a,(timex_bitmap_ship1_active)
+    or a
+    ret z
+    call prepare_timex_ship1_old_rect
+    ld a,(ship1_active)
+    or a
+    jr z,cleanup_timex_ship1_full
+    ld a,(ship1_y)
+    ld b,a
+    ld a,(timex_bitmap_ship1_y)
+    ld c,a
+    ld a,b
+    sub c
+    jr c,cleanup_timex_ship1_full
+    jr z,cleanup_timex_ship1_horizontal
+    cp 8
+    jr nc,cleanup_timex_ship1_full
+    ld b,a
+    ld a,(timex_bitmap_ship1_y)
+    push af
+    ld a,(sprite_transition_old_col)
+    ld c,a
+    ld a,(sprite_transition_old_width)
+    ld d,a
+    pop af
+    ld e,0
+    call fill_uniform_sprite_rect
+
+cleanup_timex_ship1_horizontal:
+    ; With one-pixel patrol movement, crossing a byte boundary to the right is
+    ; the only case which exposes an old column; left movement expands the new
+    ; five-byte rectangle over the complete old four-byte rectangle.
+    ld a,(ship1_x)
+    srl a
+    srl a
+    srl a
+    ld b,a
+    ld a,(sprite_transition_old_col)
+    ld c,a
+    ld a,b
+    cp c
+    ret c
+    ret z
+    sub c
+    ld d,a
+    ld a,(timex_bitmap_ship1_y)
+    ld b,8
+    ld e,0
+    jp fill_uniform_sprite_rect
+
+cleanup_timex_ship1_full:
+    ld a,(timex_bitmap_ship1_y)
+    ld b,8
+    push af
+    ld a,(sprite_transition_old_col)
+    ld c,a
+    ld a,(sprite_transition_old_width)
+    ld d,a
+    pop af
+    ld e,0
+    jp fill_uniform_sprite_rect
+
+prepare_timex_ship1_old_rect:
+    ld a,(timex_bitmap_ship1_x)
+    ld c,a
+    and 7
+    ld a,4
+    jr z,prepare_timex_ship1_width_ready
+    inc a
+prepare_timex_ship1_width_ready:
+    ld (sprite_transition_old_width),a
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld (sprite_transition_old_col),a
+    ret
+
+draw_timex_deferred_entities_opaque:
+    ; These objects are guaranteed to occupy uniform bitmap backgrounds.
+    ; Writing their complete cached rows therefore composes the new silhouette
+    ; directly: zero source pixels erase, one source pixels paint.
+    call draw_timex_current_ships
+    jp draw_timex_opaque_nonship_entities
+
+draw_timex_current_ships:
+    ld a,(ship0_active)
+    or a
+    jr z,draw_timex_current_ship1
+    ld a,(ship0_x)
+    ld c,a
+    ld a,(ship0_y)
+    ld b,8
+    ld de,ship_wide_shift_table
+    call write_water_sprite_shifted_4xn
+
+draw_timex_current_ship1:
+    ld a,(ship1_active)
+    or a
+    ret z
+    ld a,(ship1_x)
+    ld c,a
+    ld a,(ship1_y)
+    ld b,8
+    ld de,ship_wide_shift_table
+    push af
+    ld a,(ship1_dir)
+    cp 255
+    jr nz,timex_opaque_ship1_direction_ready
+    ld de,ship_left_wide_shift_table
+timex_opaque_ship1_direction_ready:
+    pop af
+    jp write_water_sprite_shifted_4xn
+
+draw_timex_opaque_nonship_entities:
+draw_timex_opaque_balloon:
+    ld a,(balloon_active)
+    or a
+    jr z,draw_timex_opaque_fuel
+    ld a,(balloon_x)
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(balloon_y)
+    ld b,20
+    ld de,balloon_sprite
+    call write_water_sprite_2xn
+
+draw_timex_opaque_fuel:
+    ld a,(fuel_active)
+    or a
+    jr z,draw_timex_opaque_helicopter
+    ld a,(fuel_x)
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(fuel_y)
+    ld b,32
+    ld de,fuel_vertical_sprite
+    call write_water_sprite_1xn
+
+draw_timex_opaque_helicopter:
+    ld a,(helicopter_active)
+    or a
+    jr z,draw_timex_opaque_tank
+    ld a,(helicopter_x)
+    ld c,a
+    ld a,(helicopter_y)
+    ld b,10
+    ld de,helicopter_shift_table
+    push af
+    ld a,(helicopter_dir)
+    cp 255
+    jr nz,timex_opaque_helicopter_right
+    ld de,helicopter_left_shift_table
+    ld a,(helicopter_frame)
+    or a
+    jr z,timex_opaque_helicopter_ready
+    ld de,helicopter_left_alt_shift_table
+    jr timex_opaque_helicopter_ready
+timex_opaque_helicopter_right:
+    ld a,(helicopter_frame)
+    or a
+    jr z,timex_opaque_helicopter_ready
+    ld de,helicopter_alt_shift_table
+timex_opaque_helicopter_ready:
+    pop af
+    call write_water_sprite_shifted_2xn
+
+draw_timex_opaque_tank:
+    ld a,(tank_active)
+    or a
+    ret z
+    ld a,(tank_x)
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(tank_y)
+    ld b,10
+    ld de,tank_facing_right_sprite
+    push af
+    ld a,(tank_side)
+    or a
+    jr z,timex_opaque_tank_direction_ready
+    ld de,tank_facing_left_sprite
+timex_opaque_tank_direction_ready:
+    pop af
+    jp write_land_sprite_2xn
 
 restore_entities:
     ; XOR is its own inverse. This must use exactly the same coordinates and
@@ -1708,6 +3110,17 @@ xor_entities:
     ld a,(player_y)
     ld b,13
     ld de,player_shift_table
+xor_player_select_bank:
+    push af
+    ld a,(player_bank)
+    or a
+    jr z,xor_player_bank_ready
+    ld de,player_right_shift_table
+    cp 255
+    jr nz,xor_player_bank_ready
+    ld de,player_left_shift_table
+xor_player_bank_ready:
+    pop af
     call xor_sprite_shifted_2xn
     jr xor_entities_bullet
 
@@ -1794,7 +3207,7 @@ xor_entities_ship0:
 xor_entities_ship1:
     ld a,(ship1_active)
     or a
-    jr z,xor_entities_fuel
+    jr z,xor_entities_balloon
     ld a,(ship1_x)
     ld c,a
     ld a,(ship1_y)
@@ -1808,6 +3221,20 @@ xor_entities_ship1:
 ship1_sprite_direction_ready:
     pop af
     call xor_sprite_shifted_4xn
+
+xor_entities_balloon:
+    ld a,(balloon_active)
+    or a
+    jr z,xor_entities_fuel
+    ld a,(balloon_x)
+    srl a
+    srl a
+    srl a
+    ld c,a
+    ld a,(balloon_y)
+    ld b,20
+    ld de,balloon_sprite
+    call xor_sprite_2xn
 
 xor_entities_fuel:
     ld a,(fuel_active)
@@ -1965,11 +3392,11 @@ xor_sprite_row:
 xor_sprite_1xn:
     ; Input A=Y, C=byte column, B=height, DE=one-byte-per-row pattern.
     ; Vertical FUEL is byte-aligned, so touching a spill byte would only waste
-    ; time. Clip at Y=184 to preserve the intentionally black bottom margin.
-    cp 184
+    ; time. Clip at PLAYFIELD_BOTTOM to preserve the three-row status panel.
+    cp PLAYFIELD_BOTTOM
     ret nc
     ld l,a
-    ld a,184
+    ld a,PLAYFIELD_BOTTOM
     sub l
     ld h,a
     ld a,b
@@ -2218,11 +3645,328 @@ projectile_sprite_row:
     ei
     ret
 
+fill_uniform_sprite_rect:
+    ; Input A=Y, B=height, C=byte column, D=width, E=literal background.
+    ; Used only where gameplay placement guarantees all-water or all-land bytes.
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    ld l,a
+    ld a,PLAYFIELD_BOTTOM
+    sub l
+    ld h,a
+    ld a,b
+    cp h
+    jr c,uniform_rect_rows_ready
+    jr z,uniform_rect_rows_ready
+    ld b,h
+uniform_rect_rows_ready:
+    ld a,b
+    ld (sprite_fill_rows),a
+    ld a,d
+    ld (sprite_fill_width),a
+    ld a,e
+    ld (sprite_fill_value),a
+    ld a,l
+    add a,a
+    ld l,a
+    ld h,HIGH(screen_line_table)
+    jr nc,uniform_rect_table_ready
+    inc h
+uniform_rect_table_ready:
+    di
+    ld (sprite_saved_sp),sp
+    ld sp,hl
+uniform_rect_row:
+    pop hl
+    ld a,l
+    add a,c
+    ld l,a
+    ld a,(sprite_fill_width)
+    ld b,a
+    ld a,(sprite_fill_value)
+uniform_rect_byte:
+    ld (hl),a
+    inc l
+    djnz uniform_rect_byte
+    ld a,(sprite_fill_rows)
+    dec a
+    ld (sprite_fill_rows),a
+    jr nz,uniform_rect_row
+    ld sp,(sprite_saved_sp)
+    ei
+    ret
+
+write_water_sprite_1xn:
+    ; Opaque byte-aligned sprite over guaranteed clear water. Unlike XOR this
+    ; stores the source zeroes too, so the new rectangle is fully replaced.
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    ld l,a
+    ld a,PLAYFIELD_BOTTOM
+    sub l
+    ld h,a
+    ld a,b
+    cp h
+    jr c,write_water_1_rows_ready
+    jr z,write_water_1_rows_ready
+    ld b,h
+write_water_1_rows_ready:
+    ld a,l
+    add a,a
+    ld l,a
+    ld h,HIGH(screen_line_table)
+    jr nc,write_water_1_table_ready
+    inc h
+write_water_1_table_ready:
+    di
+    ld (sprite_saved_sp),sp
+    ld sp,hl
+write_water_1_row:
+    pop hl
+    ld a,l
+    add a,c
+    ld l,a
+    ld a,(de)
+    ld (hl),a
+    inc de
+    djnz write_water_1_row
+    ld sp,(sprite_saved_sp)
+    ei
+    ret
+
+write_water_sprite_2xn:
+    ; Opaque byte-aligned 16-pixel sprite over water.
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    ld l,a
+    ld a,PLAYFIELD_BOTTOM
+    sub l
+    ld h,a
+    ld a,b
+    cp h
+    jr c,write_water_2_rows_ready
+    jr z,write_water_2_rows_ready
+    ld b,h
+write_water_2_rows_ready:
+    ld a,l
+    add a,a
+    ld l,a
+    ld h,HIGH(screen_line_table)
+    jr nc,write_water_2_table_ready
+    inc h
+write_water_2_table_ready:
+    di
+    ld (sprite_saved_sp),sp
+    ld sp,hl
+write_water_2_row:
+    pop hl
+    ld a,l
+    add a,c
+    ld l,a
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    ld (hl),a
+    inc de
+    djnz write_water_2_row
+    ld sp,(sprite_saved_sp)
+    ei
+    ret
+
+write_land_sprite_2xn:
+    ; A shore tank sits inside bytes known to be full land (0xff). The visible
+    ; cut-out is therefore the inverse of its ordinary one-bit source row.
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    ld l,a
+    ld a,PLAYFIELD_BOTTOM
+    sub l
+    ld h,a
+    ld a,b
+    cp h
+    jr c,write_land_2_rows_ready
+    jr z,write_land_2_rows_ready
+    ld b,h
+write_land_2_rows_ready:
+    ld a,l
+    add a,a
+    ld l,a
+    ld h,HIGH(screen_line_table)
+    jr nc,write_land_2_table_ready
+    inc h
+write_land_2_table_ready:
+    di
+    ld (sprite_saved_sp),sp
+    ld sp,hl
+write_land_2_row:
+    pop hl
+    ld a,l
+    add a,c
+    ld l,a
+    ld a,(de)
+    xor 255
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    xor 255
+    ld (hl),a
+    inc de
+    djnz write_land_2_row
+    ld sp,(sprite_saved_sp)
+    ei
+    ret
+
+write_water_sprite_shifted_2xn:
+    ; Opaque cached 16-pixel sprite. At shift zero the cached spill byte is
+    ; deliberately skipped: writing it at X=240 would wrap past screen byte 31.
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    ld l,a
+    ld a,PLAYFIELD_BOTTOM
+    sub l
+    ld h,a
+    ld a,b
+    cp h
+    jr c,write_water_shifted_2_rows_ready
+    jr z,write_water_shifted_2_rows_ready
+    ld b,h
+write_water_shifted_2_rows_ready:
+    ld a,l
+    ex af,af'
+    ld a,c
+    and 7
+    ld (sprite_write_spill),a
+    add a,a
+    ld l,a
+    ld h,0
+    add hl,de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld c,a
+
+    ex af,af'
+    add a,a
+    ld l,a
+    ld h,HIGH(screen_line_table)
+    jr nc,write_water_shifted_2_table_ready
+    inc h
+write_water_shifted_2_table_ready:
+    di
+    ld (sprite_saved_sp),sp
+    ld sp,hl
+write_water_shifted_2_row:
+    pop hl
+    ld a,c
+    add a,l
+    ld l,a
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(sprite_write_spill)
+    or a
+    jr z,write_water_shifted_2_skip_spill
+    ld a,(de)
+    ld (hl),a
+write_water_shifted_2_skip_spill:
+    inc de
+    djnz write_water_shifted_2_row
+    ld sp,(sprite_saved_sp)
+    ei
+    ret
+
+write_water_sprite_shifted_4xn:
+    ; Opaque cached 32-pixel ship, with the same shift-zero spill protection.
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    ld l,a
+    ld a,PLAYFIELD_BOTTOM
+    sub l
+    ld h,a
+    ld a,b
+    cp h
+    jr c,write_water_shifted_4_rows_ready
+    jr z,write_water_shifted_4_rows_ready
+    ld b,h
+write_water_shifted_4_rows_ready:
+    ld a,l
+    ex af,af'
+    ld a,c
+    and 7
+    ld (sprite_write_spill),a
+    add a,a
+    ld l,a
+    ld h,0
+    add hl,de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld c,a
+
+    ex af,af'
+    add a,a
+    ld l,a
+    ld h,HIGH(screen_line_table)
+    jr nc,write_water_shifted_4_table_ready
+    inc h
+write_water_shifted_4_table_ready:
+    di
+    ld (sprite_saved_sp),sp
+    ld sp,hl
+write_water_shifted_4_row:
+    pop hl
+    ld a,c
+    add a,l
+    ld l,a
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(de)
+    ld (hl),a
+    inc de
+    inc l
+    ld a,(sprite_write_spill)
+    or a
+    jr z,write_water_shifted_4_skip_spill
+    ld a,(de)
+    ld (hl),a
+write_water_shifted_4_skip_spill:
+    inc de
+    djnz write_water_shifted_4_row
+    ld sp,(sprite_saved_sp)
+    ei
+    ret
+
 bridge_fill_rows:
     ; Input A=start Y, B=row count, C=byte value. The bridge is maintained as
     ; a persistent bitmap band: only rows entering or leaving its 16-line
     ; envelope are touched during scrolling. The two clipping stages remove
-    ; The upper margin/HUD at the top and black character row at the bottom.
+    ; The upper margin at the top and the status panel at the bottom.
     cp 16
     jr nc,bridge_fill_top_clipped
     ld l,a
@@ -2236,10 +3980,10 @@ bridge_fill_rows:
     ld b,a
     ld a,16
 bridge_fill_top_clipped:
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret nc
     ld l,a
-    ld a,184
+    ld a,PLAYFIELD_BOTTOM
     sub l
     cp b
     jr nc,bridge_fill_count_ready
@@ -2317,7 +4061,7 @@ bridge_refresh_edge_row:
     ; Input A=one dirty bridge Y. HUD and lower margin remain immutable.
     cp 16
     ret c
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret nc
     call calc_screen_line_addr
     ld a,(bridge_col)
@@ -2346,9 +4090,12 @@ bridge_paint_road_attributes:
 bridge_paint_destroyed_road_attributes:
     ; Broken bridge: retain both white approaches but restore blue water in
     ; the former span. The road remnant continues scrolling with the world.
-    ld a,0x4c
+    ld a,0x4c                       ; water must remain the same BRIGHT blue
     ld (bridge_center_attr),a
 bridge_paint_road_attribute_span:
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,timex_bridge_paint_road_span
     ld a,(bridge_y)
     srl a
     srl a
@@ -2377,6 +4124,9 @@ advance_bridge_attribute_row:
 bridge_clear_road_attributes:
     ; Restore every attribute cell touched by the road, not merely the river
     ; span. This prevents white bank rectangles remaining after destruction.
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,timex_bridge_clear_road_span
     ld a,(bridge_y)
     srl a
     srl a
@@ -2408,7 +4158,7 @@ bridge_paint_road_attribute_row:
     ; touched the wide river span twice and caused visible bridge-frame stalls.
     cp 2
     ret c
-    cp 23
+    cp 21
     ret nc
     ld b,a
     and 7
@@ -2461,7 +4211,7 @@ bridge_paint_full_attribute_row:
     ; Input A=row (2..22), C=value. Paint all 32 cells in that character row.
     cp 2
     ret c
-    cp 23
+    cp 21
     ret nc
     ld b,a
     and 7
@@ -2503,6 +4253,9 @@ bridge_update_attributes:
     ; at most one row leaves at the top and one arrives at the bottom.
     ; bridge_restore_y is scratch for reconstructing the departing bitmap
     ; rows and has already advanced, so recover old Y from new Y - speed.
+    ld a,TIMEX_HICOLOR
+    or a
+    jp nz,timex_bridge_update_attributes
     ld a,(speed_pixels)
     ld d,a
     ld a,(bridge_y)
@@ -2537,6 +4290,134 @@ bridge_attr_top_unchanged:
     ret z
     jp bridge_paint_road_attribute_row
 
+timex_bridge_paint_road_span:
+    ld a,(bridge_y)
+    ld (timex_attr_y),a
+    ld a,16
+    ld (bridge_attr_rows),a
+timex_bridge_paint_span_row:
+    ld a,(timex_attr_y)
+    call timex_bridge_paint_road_scanline
+    ld a,(timex_attr_y)
+    inc a
+    ld (timex_attr_y),a
+    ld a,(bridge_attr_rows)
+    dec a
+    ld (bridge_attr_rows),a
+    jr nz,timex_bridge_paint_span_row
+    ret
+
+timex_bridge_clear_road_span:
+    ld a,(bridge_y)
+    ld (timex_attr_y),a
+    ld a,16
+    ld (bridge_attr_rows),a
+timex_bridge_clear_span_row:
+    ld a,(timex_attr_y)
+    call timex_bridge_clear_scanline
+    ld a,(timex_attr_y)
+    inc a
+    ld (timex_attr_y),a
+    ld a,(bridge_attr_rows)
+    dec a
+    ld (bridge_attr_rows),a
+    jr nz,timex_bridge_clear_span_row
+    ret
+
+timex_bridge_update_attributes:
+    ; The bitmap moved by one or two lines. Restore those exact departing 8x1
+    ; rows and paint only the same number entering at the new bottom edge.
+    ld a,(speed_pixels)
+    ld (bridge_attr_rows),a
+    ld b,a
+    ld a,(bridge_y)
+    sub b
+    ld (timex_attr_y),a
+timex_bridge_restore_old_row:
+    ld a,(bridge_attr_rows)
+    or a
+    jr z,timex_bridge_prepare_new_rows
+    ld a,(timex_attr_y)
+    call timex_bridge_clear_scanline
+    ld a,(timex_attr_y)
+    inc a
+    ld (timex_attr_y),a
+    ld a,(bridge_attr_rows)
+    dec a
+    ld (bridge_attr_rows),a
+    jr timex_bridge_restore_old_row
+
+timex_bridge_prepare_new_rows:
+    ld a,(speed_pixels)
+    ld (bridge_attr_rows),a
+    ld b,a
+    ld a,(bridge_y)
+    add a,16
+    sub b
+    ld (timex_attr_y),a
+timex_bridge_paint_new_row:
+    ld a,(bridge_attr_rows)
+    or a
+    ret z
+    ld a,(timex_attr_y)
+    call timex_bridge_paint_road_scanline
+    ld a,(timex_attr_y)
+    inc a
+    ld (timex_attr_y),a
+    ld a,(bridge_attr_rows)
+    dec a
+    ld (bridge_attr_rows),a
+    jr timex_bridge_paint_new_row
+
+timex_bridge_clear_scanline:
+    cp 16
+    ret c
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    ld c,0x4c
+    jp timex_fill_attribute_scanline
+
+timex_bridge_paint_road_scanline:
+    ; Input A=physical Y. Road approaches stay white/black while the centre is
+    ; brown when intact or ordinary green/blue after the span is destroyed.
+    cp 16
+    ret c
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    call timex_attribute_address
+    ld a,(bridge_col)
+    or a
+    jr z,timex_bridge_attr_span
+    ld b,a
+    ld a,0x47
+timex_bridge_attr_left_byte:
+    ld (hl),a
+    inc l
+    djnz timex_bridge_attr_left_byte
+timex_bridge_attr_span:
+    ld a,(bridge_width)
+    ld b,a
+    ld a,(bridge_center_attr)
+timex_bridge_attr_center_byte:
+    ld (hl),a
+    inc l
+    djnz timex_bridge_attr_center_byte
+    ld a,(bridge_col)
+    ld b,a
+    ld a,(bridge_width)
+    add a,b
+    ld b,a
+    ld a,32
+    sub b
+    ret z
+    ld b,a
+    ld a,0x47
+timex_bridge_attr_right_byte:
+    ld (hl),a
+    inc l
+    djnz timex_bridge_attr_right_byte
+    ret
+
 
 ; ---------------------------------------------------------------------------
 ; Object movement
@@ -2552,18 +4433,27 @@ update_entities:
     call advance_ship1
     call advance_enemy_plane
     call advance_helicopter
+    call advance_balloon
     call update_fuel
     call update_tank
     call update_bridge_tank
     call update_tank_shell
+    ; Usually the Timex uniform-background group is still visible. A live/new
+    ; bridge is the exceptional frame which must clear it before road writes.
+    call prepare_frame_entities_for_bridge
     call update_bridge
+    ; Ordinary frames expose the clean background only for the two collision
+    ; routines below, then redraw the group immediately before returning.
+    call prepare_frame_entities_for_collision
     call update_bullet
     call keep_water_objects_off_bridge
+    call transition_timex_ships_before_player_collision
     call check_player_collision
-    ret
+    jp redraw_timex_deferred_after_collision
 
 update_player:
     ld a,(player_move)
+    ld (player_bank),a              ; pose used by both draw and collision
     or a
     ret z
     cp 255
@@ -2589,8 +4479,8 @@ store_player_x:
     ret
 
 can_spawn_water_enemy:
-    ; Cap combat sprites over the river at two simultaneous actors. FUEL and
-    ; tanks have independent gameplay roles and are not counted in this budget.
+    ; Cap combat sprites over the river at two simultaneous actors. The static
+    ; balloon, FUEL and tanks have separate roles and are not counted here.
     ld b,0
     ld a,(ship0_active)
     add a,b
@@ -2621,7 +4511,7 @@ advance_ship0:
     ld b,a
     ld a,(ship0_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr c,store_ship0_y
     xor a
     ld (ship0_active),a
@@ -2669,7 +4559,7 @@ advance_ship1:
     ld b,a
     ld a,(ship1_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr c,store_ship1_y
     xor a
     ld (ship1_active),a
@@ -2770,7 +4660,7 @@ advance_enemy_plane:
     ld b,a
     ld a,(enemy_plane_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr c,store_enemy_plane_y
     xor a
     ld (enemy_plane_active),a
@@ -2829,7 +4719,7 @@ update_hit_explosion:
     ld b,a
     ld a,(hit_explosion_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr nc,finish_hit_explosion
     ld (hit_explosion_y),a
 
@@ -2867,9 +4757,9 @@ start_hit_explosion:
     jr hit_explosion_y_ready
 hit_explosion_has_top_room:
     sub 2
-    cp 172
+    cp PLAYFIELD_BOTTOM-12
     jr c,hit_explosion_y_ready
-    ld a,171
+    ld a,PLAYFIELD_BOTTOM-13
 hit_explosion_y_ready:
     ld (hit_explosion_y),a
     ld a,15
@@ -2903,8 +4793,15 @@ check_ship1_spawn_y:
 check_helicopter_spawn_y:
     ld a,(helicopter_active)
     or a
-    jr z,check_plane_spawn_y
+    jr z,check_balloon_spawn_y
     ld a,(helicopter_y)
+    call actor_y_too_close
+    jr c,top_actor_y_is_busy
+check_balloon_spawn_y:
+    ld a,(balloon_active)
+    or a
+    jr z,check_plane_spawn_y
+    ld a,(balloon_y)
     call actor_y_too_close
     jr c,top_actor_y_is_busy
 check_plane_spawn_y:
@@ -2929,38 +4826,38 @@ top_actor_y_is_busy:
     ret
 
 actor_y_too_close:
-    ; Input A=existing actor Y, B=candidate Y. Carry means less than twelve
-    ; scanlines apart, enough for the tallest 10-line water enemy plus a gap.
+    ; Input A=existing actor Y, B=candidate Y. Carry means less than twenty-two
+    ; scanlines apart, covering the 20-line balloon plus a two-line gap.
     ld c,a
     ld a,b
     cp c
     jr nc,actor_candidate_below
     ld a,c
     sub b
-    cp 12
+    cp 22
     ret
 actor_candidate_below:
     sub c
-    cp 12
+    cp 22
     ret
 
 actor_y_overlaps_fuel:
     ; Input A=FUEL top, B=candidate combat-actor top. Carry means that the
-    ; candidate's 10-line body plus a two-line gap intersects the full 32-line
-    ; depot. This is used when ships/aircraft spawn after FUEL already exists.
+    ; tallest 20-line body plus a two-line gap intersects the full 32-line
+    ; depot. This is used when another water actor spawns after FUEL exists.
     ld c,a
     ld a,b
-    add a,12
+    add a,22                       ; tallest candidate plus a two-line gap
     cp c
     jr c,actor_clears_fuel
     jr z,actor_clears_fuel
     ld a,c
-    cp 152
+    cp PLAYFIELD_BOTTOM-32
     jr nc,fuel_bottom_is_playfield_edge
     add a,32
     jr fuel_bottom_ready
 fuel_bottom_is_playfield_edge:
-    ld a,184
+    ld a,PLAYFIELD_BOTTOM
 fuel_bottom_ready:
     cp b
     jr c,actor_clears_fuel
@@ -2999,8 +4896,15 @@ check_helicopter_fuel_y:
 check_plane_fuel_y:
     ld a,(enemy_plane_active)
     or a
-    jr z,fuel_y_is_clear
+    jr z,check_balloon_fuel_y
     ld a,(enemy_plane_y)
+    call fuel_y_too_close
+    jr c,top_fuel_y_is_busy
+check_balloon_fuel_y:
+    ld a,(balloon_active)
+    or a
+    jr z,fuel_y_is_clear
+    ld a,(balloon_y)
     call fuel_y_too_close
     jr c,top_fuel_y_is_busy
 fuel_y_is_clear:
@@ -3036,7 +4940,7 @@ advance_helicopter:
     ld b,a
     ld a,(helicopter_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr c,store_helicopter_y
     xor a
     ld (helicopter_active),a
@@ -3133,6 +5037,51 @@ animate_helicopter_rotor:
     ld (helicopter_frame),a
     ret
 
+advance_balloon:
+    ; The balloon is fixed in X like an obstacle anchored in the world. It has
+    ; no patrol or animation; only the ordinary course scroll changes its Y.
+    ld a,(balloon_active)
+    or a
+    jr z,wait_for_balloon
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(balloon_y)
+    add a,b
+    cp PLAYFIELD_BOTTOM-19           ; keep all twenty rows in the playfield
+    jr c,store_balloon_y
+    xor a
+    ld (balloon_active),a
+    ld a,180
+    ld (balloon_delay),a
+    ret
+store_balloon_y:
+    ld (balloon_y),a
+    ret
+
+wait_for_balloon:
+    ld a,(balloon_delay)
+    or a
+    jr z,try_spawn_balloon
+    dec a
+    ld (balloon_delay),a
+    ret
+try_spawn_balloon:
+    ld a,16
+    call choose_clear_water_actor_y
+    cp 16
+    jr nz,defer_balloon_spawn
+    ld (balloon_y),a
+    call calc_safe_river_x
+    and 0xf8                        ; byte alignment avoids a shifted cache
+    ld (balloon_x),a
+    ld a,1
+    ld (balloon_active),a
+    ret
+defer_balloon_spawn:
+    ld a,16
+    ld (balloon_delay),a
+    ret
+
 update_fuel:
     ; FUEL is a non-lethal river object. Touching its 8x32 rectangle pauses
     ; consumption and transfers one unit every five frames; without contact,
@@ -3147,7 +5096,7 @@ update_fuel:
     ld b,a
     ld a,(fuel_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr c,store_scrolling_fuel_y
     xor a
     ld (fuel_active),a
@@ -3216,7 +5165,7 @@ refill_player_fuel:
     push af
     call start_fuel_ding
     pop af
-    and 7
+    and 1                           ; detailed bottom bar changes every 2 units
     ret nz
     jp mark_fuel_hud_dirty
 
@@ -3232,7 +5181,7 @@ consume_fuel:
     jr z,out_of_fuel
     dec a
     ld (fuel_level),a
-    and 7
+    and 1
     jr nz,check_consumed_fuel_empty
     call mark_fuel_hud_dirty
 check_consumed_fuel_empty:
@@ -3257,7 +5206,7 @@ update_tank:
 
 update_bridge_tank:
     ; Modes 1/2 are crossing and waiting/fire. Modes 3/4 are the corresponding
-    ; states waiting above the HUD until the bridge reaches visible rows.
+    ; states waiting above the playfield until the bridge reaches visible rows.
     ld a,(bridge_tank_mode)
     cp 3
     jr nc,activate_waiting_bridge_tank
@@ -3351,7 +5300,7 @@ scroll_bridge_tank_down:
     ld b,a
     ld a,(bridge_tank_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr c,store_bridge_tank_y
     xor a
     ld (bridge_tank_active),a
@@ -3431,12 +5380,12 @@ update_shore_tank:
     jp maybe_fire_tank
 
 scroll_tank_down:
-    ; Return A=1 while the tank remains in the 168-line playfield, else zero.
+    ; Return A=1 while the tank remains in the 152-line playfield, else zero.
     ld a,(speed_pixels)
     ld b,a
     ld a,(tank_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr c,store_tank_y
     xor a
     ld (tank_active),a
@@ -3597,7 +5546,7 @@ update_tank_shell:
     ld b,a
     ld a,(tank_shell_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr nc,remove_tank_shell
     ld (tank_shell_y),a
 
@@ -3642,7 +5591,7 @@ update_tank_splash:
     ld b,a
     ld a,(tank_shell_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr nc,remove_tank_shell
     ld (tank_shell_y),a
     ld a,(tank_splash_timer)
@@ -3753,7 +5702,7 @@ bridge_restore_top:
     or a
     jr z,bridge_top_restored
     ld a,(bridge_restore_y)
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr nc,bridge_top_restored
     ld (dirty_y),a
     call render_v3_row
@@ -3770,7 +5719,7 @@ bridge_top_restored:
     ld b,a
     ld a,(bridge_y)
     add a,b
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr c,store_bridge_y
     ; No new bridge span remains on screen, so clear its last colour cells.
     call bridge_clear_road_attributes
@@ -3831,7 +5780,7 @@ update_destroyed_road:
     ld (road_mark_rows),a
 destroyed_road_restore_loop:
     ld a,(road_mark_y)
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr nc,destroyed_road_restore_next
     ld c,0
     call bridge_fill_full_bitmap_row
@@ -3853,11 +5802,11 @@ destroyed_road_restore_next:
     ld (bridge_y),a
 
     call bridge_draw_entering_destroyed_road_markings
-    ld a,0x4c
+    ld a,0x4c                       ; fixed BRIGHT-blue water after destruction
     ld (bridge_center_attr),a
     call bridge_update_attributes
     ld a,(bridge_y)
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret c
     xor a
     ld (destroyed_road_active),a
@@ -3897,7 +5846,7 @@ bridge_draw_destroyed_road_marking_row:
     ; the former bridge span stays untouched blue water.
     cp 16
     ret c
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret nc
     call calc_screen_line_addr
     ld c,0
@@ -3962,7 +5911,7 @@ bridge_erase_road_marking_row:
     ; need restoring, halving writes on the bridge's hot scrolling path.
     cp 16
     ret c
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret nc
     call calc_screen_line_addr
     inc l
@@ -4001,7 +5950,7 @@ bridge_fill_full_bitmap_row:
     ; bridge makes the complete 256-pixel scanline solid before dash cutting.
     cp 16
     ret c
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret nc
     call calc_screen_line_addr
     ld b,4
@@ -4031,7 +5980,7 @@ bridge_draw_road_marking_row:
     ; only the sixteen black dash bytes instead of redundantly storing all 32.
     cp 16
     ret c
-    cp 184
+    cp PLAYFIELD_BOTTOM
     ret nc
     call calc_screen_line_addr
     inc l
@@ -4057,7 +6006,7 @@ update_existing_bullet:
     or a
     ret z
     ld a,(bullet_y)
-    ; The projectile may reach Y=16, but never enters the HUD at Y=8..15.
+    ; The projectile may reach Y=16, but never enters either protected margin.
     cp 22
     jr nc,move_bullet_up
     xor a
@@ -4070,6 +6019,9 @@ move_bullet_up:
     ; Test the swept 10-line interval (6 pixels of travel plus the 4-pixel
     ; projectile) so a fast bullet cannot tunnel through an eight-line ship.
     call bullet_hits_fuel
+    or a
+    ret nz
+    call bullet_hits_balloon
     or a
     ret nz
     call bullet_hits_ship0
@@ -4202,7 +6154,7 @@ bullet_hits_background:
     ld (bullet_background_rows),a
 bullet_background_row:
     ld a,(bullet_background_y)
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr nc,bullet_background_collision
     call calc_screen_line_addr
     ld a,(bullet_background_col)
@@ -4249,6 +6201,31 @@ bullet_hits_fuel:
     ld (fuel_active),a
     ld a,96
     ld (fuel_delay),a
+    call add_score_100
+    ld a,1
+    ret
+
+bullet_hits_balloon:
+    ld a,(balloon_active)
+    or a
+    ret z
+    ld a,(balloon_x)
+    ld c,a
+    ld e,16
+    ld a,(balloon_y)
+    ld b,20
+    call bullet_hits_actor
+    or a
+    ret z
+    ld a,(balloon_y)
+    ld b,a
+    ld a,(balloon_x)
+    call start_hit_explosion
+    xor a
+    ld (bullet_active),a
+    ld (balloon_active),a
+    ld a,180
+    ld (balloon_delay),a
     call add_score_100
     ld a,1
     ret
@@ -4473,7 +6450,7 @@ destroy_bridge_restore:
     or a
     jr z,destroy_bridge_done
     ld a,(bridge_restore_y)
-    cp 184
+    cp PLAYFIELD_BOTTOM
     jr nc,destroy_bridge_done
     ; render_v3_row normally assumes that all bank interiors are already set.
     ; Road dashes violate that invariant, so clear the complete scanline and
@@ -4615,13 +6592,23 @@ check_ship1_bridge:
 check_helicopter_bridge:
     ld a,(helicopter_active)
     or a
-    jr z,check_fuel_bridge
+    jr z,check_balloon_bridge
     ld a,(helicopter_y)
     ld b,10
     call object_overlaps_bridge
     or a
-    jr z,check_fuel_bridge
+    jr z,check_balloon_bridge
     call relocate_helicopter
+check_balloon_bridge:
+    ld a,(balloon_active)
+    or a
+    jr z,check_fuel_bridge
+    ld a,(balloon_y)
+    ld b,20
+    call object_overlaps_bridge
+    or a
+    jr z,check_fuel_bridge
+    call relocate_balloon
 check_fuel_bridge:
     ld a,(fuel_active)
     or a
@@ -4657,6 +6644,13 @@ relocate_helicopter:
     ld (helicopter_delay),a
     ret
 
+relocate_balloon:
+    xor a
+    ld (balloon_active),a
+    ld a,16
+    ld (balloon_delay),a
+    ret
+
 relocate_fuel:
     xor a
     ld (fuel_active),a
@@ -4665,14 +6659,10 @@ relocate_fuel:
     ret
 
 check_player_collision:
-    ; Test the actual opaque player pixels against the current bitmap. At this
-    ; point all XOR sprites have been removed, so set background bits mean
-    ; bank, island or an intact bridge and zero bits mean navigable water.
-    call check_player_background_pixels
-    jp c,player_crashed
-
     ; The shell uses the same forgiving 6x6 player core as moving enemies,
-    ; but its collision rectangle is the actual two-pixel projectile.
+    ; but its collision rectangle is the actual two-pixel projectile. Explicit
+    ; actor checks precede the bitmap test because Timex ships deliberately
+    ; remain resident while they are transformed by top/side deltas.
     ld a,(tank_shell_active)
     cp 1                            ; the harmless splash cannot kill the jet
     jr nz,check_player_ship0
@@ -4700,11 +6690,23 @@ check_player_ship0:
 check_player_ship1:
     ld a,(ship1_active)
     or a
-    jr z,check_player_enemy_plane
+    jr z,check_player_balloon
     ld a,(ship1_x)
     ld c,a
     ld a,(ship1_y)
     ld b,8
+    call player_overlaps_object
+    jp c,player_crashed
+check_player_balloon:
+    ld a,16
+    ld (object_collision_width),a
+    ld a,(balloon_active)
+    or a
+    jr z,check_player_enemy_plane
+    ld a,(balloon_x)
+    ld c,a
+    ld a,(balloon_y)
+    ld b,20
     call player_overlaps_object
     jp c,player_crashed
 check_player_enemy_plane:
@@ -4731,17 +6733,22 @@ check_player_helicopter:
     jp c,player_crashed
 check_player_bridge_tank:
     ; The ordinary shore tank is deliberately absent here: it remains on
-    ; lethal land which the bitmap test above already rejects. Only its flying
+    ; lethal land which the bitmap test below rejects. Only its flying
     ; shell can hit a player who stays over water. A bridge tank is different,
     ; because its route may place it directly across the player's path.
     ld a,(bridge_tank_active)
     or a
-    ret z
+    jr z,check_player_background
     ld a,(bridge_tank_x)
     ld c,a
     ld a,(bridge_tank_y)
     ld b,10
     call player_overlaps_object
+    jp c,player_crashed
+check_player_background:
+    ; All potentially resident sprite pixels have now been handled explicitly.
+    ; Remaining set bits mean bank, island or an intact bridge.
+    call check_player_background_pixels
     ret nc
 player_crashed:
     ld a,1
@@ -4758,6 +6765,14 @@ check_player_background_pixels:
     ld l,a
     ld h,0
     ld de,player_shift_table
+    ld a,(player_bank)
+    or a
+    jr z,player_collision_bank_ready
+    ld de,player_right_shift_table
+    cp 255
+    jr nz,player_collision_bank_ready
+    ld de,player_left_shift_table
+player_collision_bank_ready:
     add hl,de
     ld e,(hl)
     inc hl
@@ -4926,7 +6941,35 @@ crash_to_game_over:
     call show_game_over
     jp main_loop
 
+show_ready_screen:
+    call prepare_wait_screen
+    ld hl,title_text
+    ld b,14
+    ld d,76
+    ld e,9
+    call draw_rom_text
+    ld hl,start_text
+    ld b,13
+    ld d,100
+    ld e,9
+    call draw_rom_text
+    jp finish_wait_screen
+
 show_game_over:
+    call prepare_wait_screen
+    ld hl,game_over_text
+    ld b,9
+    ld d,76
+    ld e,11
+    call draw_rom_text
+    ld hl,restart_text
+    ld b,15
+    ld d,100
+    ld e,8
+    call draw_rom_text
+    jp finish_wait_screen
+
+prepare_wait_screen:
     ; Independent black screen; ROM glyphs are copied directly to the bitmap,
     ; so this works without BASIC channels or system-variable assumptions.
     xor a
@@ -4938,22 +6981,34 @@ show_game_over:
     ld de,0x4001
     ld bc,6143
     ldir
+    ld a,TIMEX_HICOLOR
+    or a
+    jr nz,show_game_over_timex_attributes
     ld hl,0x5800
     ld (hl),0x47
     ld de,0x5801
     ld bc,767
     ldir
+    jr show_game_over_attributes_ready
+show_game_over_timex_attributes:
+    ld hl,0x6000
+    ld (hl),0x47
+    ld de,0x6001
+    ld bc,6143
+    ldir
+show_game_over_attributes_ready:
+    ret
 
-    ld hl,game_over_text
-    ld b,9
-    ld d,76
-    ld e,11
+finish_wait_screen:
+    ld hl,footer_text
+    ld b,32
+    ld d,184
+    ld e,0
     call draw_rom_text
-    ld hl,restart_text
-    ld b,15
-    ld d,100
-    ld e,8
-    call draw_rom_text
+    xor a
+    ld (footer_index),a
+    ld a,8
+    ld (footer_timer),a
 
     ld a,2
     ld (game_state),a
@@ -4962,8 +7017,9 @@ show_game_over:
     ret
 
 game_over_frame:
-    ; Require a release after entering this screen, then accept SPACE or the
-    ; Kempston FIRE button as a clean edge for starting a new two-life game.
+    ; Require a release after entering either waiting screen, then accept SPACE
+    ; or Kempston FIRE as a clean edge for starting a new two-life game.
+    call update_footer_scroller       ; movement is allowed only between games
     ld bc,0x7ffe
     in a,(c)
     bit 0,a
@@ -5055,7 +7111,10 @@ draw_rom_character_row:
 init_ay_sound:
     ; Channel A is noise-only for the jet engine. Channel B is tone-only for
     ; the missile sweep. Channel C provides a brief tone/noise impact burst.
-    ; Port writes are harmless on a stock 48K machine with no AY chip.
+    ; Standard AY writes are harmless on a stock 48K machine. In the Timex
+    ; build, detect a real 2068 first so a TC2048 never receives writes through
+    ; its even $F6 port while no AY is present.
+    call detect_ay_output
     xor a
     ld (shot_sound_timer),a
     ld (explosion_sound_timer),a
@@ -5075,6 +7134,36 @@ init_ay_sound:
     ld a,10
     call ay_write_register
     call update_ay_engine
+    ret
+
+detect_ay_output:
+    ld a,TIMEX_HICOLOR
+    or a
+    jr nz,detect_timex_2068_ay
+    ld a,1                         ; standard build keeps the existing AY path
+    ld (timex_ay_present),a
+    ret
+
+detect_timex_2068_ay:
+    ; TC2068 and TS2068 HOME ROMs contain "Timex" at $113D. The TC2048 ROM
+    ; does not, so this read-only test separates native-AY 2068 machines from
+    ; the otherwise compatible, beeper-only TC2048 before touching $F5/$F6.
+    ld hl,0x113d
+    ld de,timex_rom_signature
+    ld b,5
+detect_timex_2068_byte:
+    ld a,(de)
+    cp (hl)
+    jr nz,detect_timex_ay_missing
+    inc de
+    inc hl
+    djnz detect_timex_2068_byte
+    ld a,1
+    ld (timex_ay_present),a
+    ret
+detect_timex_ay_missing:
+    xor a
+    ld (timex_ay_present),a
     ret
 
 update_ay_sound:
@@ -5273,13 +7362,32 @@ silence_ay:
     ret
 
 ay_write_register:
-    ; Input A=register, E=value. Spectrum 128K selects through FFFD and writes
-    ; data through BFFD. C stays FD, so changing only B selects the data port.
+    ; Input A=register, E=value. TC2068/TS2068 expose their AY through the exact
+    ; 16-bit ports $00F5/$00F6; Spectrum 128K retains $FFFD/$BFFD.
+    push af
+    ld a,TIMEX_HICOLOR
+    or a
+    jr nz,ay_write_timex_register
+    pop af
     ld bc,0xfffd
     out (c),a
     ld b,0xbf
     ld a,e
     out (c),a
+    ret
+ay_write_timex_register:
+    ld a,(timex_ay_present)
+    or a
+    jr z,skip_timex_ay_write
+    pop af
+    ld bc,0x00f5
+    out (c),a
+    ld a,e
+    inc c                            ; BC=$00F6, AY data port
+    out (c),a
+    ret
+skip_timex_ay_write:
+    pop af
     ret
 
 
@@ -5353,7 +7461,7 @@ resolve_requested_speed:
     jr read_steering
 
 resolve_fast_speed:
-    ; Two-pixel scrolling doubles the bank pass from 21 to 42 scanlines. Never
+    ; Two-pixel scrolling doubles the bank pass from 19 to 38 scanlines. Never
     ; combine that peak with a tank, bridge/road repair or either projectile.
     ; In a light scene alternate 1/2 pixels for a 1.5 px average; a heavy scene
     ; is capped at one pixel so every frame retains enough 50 Hz headroom.
@@ -5502,17 +7610,17 @@ profile_end:
 ; Constant data
 ; ---------------------------------------------------------------------------
 
-block_motion_table:
-    ; centre step, half-width step in four-pixel units per eight-line block.
-    ; Besides whole-river slopes, half-width changes make the banks converge or
-    ; diverge. Combined centre/width steps anchor one bank while the other one
-    ; turns, breaking the former near-symmetry without exceeding one byte of
-    ; edge movement between adjacent blocks. Modes are interleaved so the
-    ; deterministic initial LFSR sequence also contains asymmetric sections.
-    db 0,0, 1,1, 1,255, 0,1
-    db 1,0, 255,0, 0,255, 255,1
-    db 0,0, 1,0, 255,0, 0,1
-    db 0,255, 1,0, 255,0, 255,255
+center_motion_table:
+    ; Signed centre motion in pixels per eight-line block. Half-width follows
+    ; its own long +/-2 cycle; combining both motions creates fixed-bank runs,
+    ; uneven bends and breathing sections without mirrored shorelines.
+    db 0,1,254,1, 2,255,0,2
+    db 255,1,254,0, 1,255,2,254
+
+left_edge_masks:
+    db 0x00,0x80,0xc0,0xe0,0xf0,0xf8,0xfc,0xfe
+right_edge_masks:
+    db 0xff,0x7f,0x3f,0x1f,0x0f,0x07,0x03,0x01
 
 ay_engine_noise_periods:
     ; Slow, normal, fast. AY noise frequency rises as the period falls.
@@ -5531,6 +7639,18 @@ player_jet_sprite:
     db 0x00,0xc0, 0x00,0xc0, 0x00,0xc0, 0x03,0xf0
     db 0x0f,0xfc, 0x3f,0xff, 0x3f,0xff, 0x3c,0xcf
     db 0x30,0xc3, 0x00,0xc0, 0x03,0xf0, 0x0f,0xfc, 0x0c,0xcc
+
+; Banking raises the inside wing and drops the outside wing. The fuselage and
+; tail stay centred, so steering reads as a roll rather than a new aircraft.
+player_jet_left_sprite:
+    db 0x00,0xc0, 0x00,0xc0, 0x00,0xc0, 0x03,0xf0
+    db 0x3c,0xc0, 0x3f,0xfc, 0x3f,0xff, 0x0f,0xff
+    db 0x00,0xcf, 0x00,0xc3, 0x03,0xf0, 0x0f,0xfc, 0x0c,0xcc
+
+player_jet_right_sprite:
+    db 0x00,0xc0, 0x00,0xc0, 0x00,0xc0, 0x03,0xf0
+    db 0x00,0xcf, 0x0f,0xff, 0x3f,0xff, 0x3f,0xf0
+    db 0x30,0xc0, 0x30,0xc0, 0x03,0xf0, 0x0f,0xfc, 0x0c,0xcc
 
 projectile_mask_table:
     ; A two-pixel column shifted through a byte. Only shift seven spills.
@@ -5603,6 +7723,10 @@ game_over_text:
     db 71,65,77,69,32,79,86,69,82
 restart_text:
     db 70,73,82,69,32,84,79,32,82,69,83,84,65,82,84
+title_text:
+    db 65,84,84,82,73,66,85,84,69,32,82,65,73,68
+start_text:
+    db 70,73,82,69,32,84,79,32,83,84,65,82,84
 
 hud_text:
     db 76,73,86,69,83,58
@@ -5623,10 +7747,55 @@ score_digit_3: db 48
 score_digit_4: db 48
 score_digit_5: db 48
 
+fuel_bar_text:
+    db 70,85,69,76,58,32,91        ; "FUEL: ["
+fuel_bar_0: db 35
+fuel_bar_1: db 35
+fuel_bar_2: db 35
+fuel_bar_3: db 35
+fuel_bar_4: db 35
+fuel_bar_5: db 35
+fuel_bar_6: db 35
+fuel_bar_7: db 35
+fuel_bar_8: db 35
+fuel_bar_9: db 35
+fuel_bar_10: db 35
+fuel_bar_11: db 35
+fuel_bar_12: db 35
+fuel_bar_13: db 35
+fuel_bar_14: db 35
+fuel_bar_15: db 35
+fuel_bar_16: db 35
+fuel_bar_17: db 35
+fuel_bar_18: db 35
+fuel_bar_19: db 35
+fuel_bar_20: db 35
+fuel_bar_21: db 35
+fuel_bar_22: db 35
+fuel_bar_23: db 35
+    db 93                           ; ']'
+
+footer_text:
+    db 40,67,41,32,50,48,50,54,32
+    db 103,105,116,104,117,98,46,99,111,109
+    db 47,100,116,122,45,108,97,98,115,32,32,32,32
+
+timex_rom_signature:
+    db 84,105,109,101,120            ; "Timex" at HOME ROM $113D on a 2068
+
+; A byte-aligned 16x20 balloon reconstructed from the GIF reference: broad
+; striped envelope, long ropes and a hanging basket. It is static in world X.
+balloon_sprite:
+    db 0x03,0xc0, 0x0f,0xf0, 0x3f,0xfc, 0x7f,0xfe
+    db 0xff,0xff, 0xff,0xff, 0xff,0xff, 0xff,0xff
+    db 0x7f,0xfe, 0x3f,0xfc, 0x0f,0xf0, 0x02,0x40
+    db 0x02,0x40, 0x02,0x40, 0x02,0x40, 0x02,0x40
+    db 0x07,0xe0, 0x07,0xe0, 0x07,0xe0, 0x03,0xc0
+
 ; Four compact 8x8 cells form the vertical Atari-style refuelling depot. Like
 ; the original FuelA/FuelB data, set pixels are the solid coloured body and the
 ; letters are transparent cut-outs. The attribute painter assigns stable
-; white/magenta/white/magenta bands while the cut-outs show blue river water.
+; magenta/white/magenta/white bands while the cut-outs show blue river water.
 fuel_vertical_sprite:
     ; F
     db 0xff,0x81,0x9f,0x9f,0x83,0x9f,0x9f,0xff
@@ -5763,8 +7932,8 @@ fire_down: db 0                  ; edge detector shared by SPACE and FIRE
 r_down: db 0                     ; edge detector for manual new-game reset
 profile_enabled: db PROFILE_BORDER
 
-gen_center_q: db 32
-gen_half_q: db 19
+gen_center_x: db 128
+gen_half_x: db 76
 center_step: db 0
 half_step: db 0
 motion_timer: db 0
@@ -5788,13 +7957,14 @@ redraw_y: db 0
 ; Actor X coordinates are real pixels. tank_col is retained only as temporary
 ; byte geometry when placing a shore tank; drawing and collision use tank_x.
 ; Y always refers to the top scanline of the sprite.
-player_y: db 170
+player_y: db PLAYFIELD_BOTTOM-14
 player_x: db 120
 player_move: db 0
+player_bank: db 0                ; 255=left roll, 0=level, 1=right roll
 crashed: db 0
 bullet_active: db 0
 fire_pending: db 0
-bullet_y: db 166
+bullet_y: db PLAYFIELD_BOTTOM-18
 bullet_x: db 120
 bullet_background_y: db 0
 bullet_background_rows: db 0
@@ -5831,6 +8001,10 @@ fuel_level: db 48                  ; six HUD cells, eight units per cell
 fuel_consume_timer: db 32
 fuel_refill_timer: db 1
 fuel_refueling: db 0               ; skips consumption while player overlaps
+balloon_y: db 16
+balloon_x: db 120                   ; byte-aligned top-left of 16x20 balloon
+balloon_active: db 0
+balloon_delay: db 120
 tank_y: db 46
 tank_col: db 3
 tank_x: db 24
@@ -5875,6 +8049,45 @@ dirty_old_island_right: db 255
 dirty_new_island_left: db 255
 dirty_new_island_right: db 255
 sprite_saved_sp: dw 0            ; real SP while POP HL walks scanline table
+sprite_write_spill: db 0         ; nonzero when an opaque shifted row needs spill
+sprite_fill_rows: db 0           ; opaque uniform-background rectangle scratch
+sprite_fill_width: db 0
+sprite_fill_value: db 0
+sprite_transition_old_col: db 0  ; resident-sprite top/side delta scratch
+sprite_transition_old_width: db 0
+
+; Timex renderer scratch. These flags let the terrain-crossing and uniform-
+; background groups be removed at different points without changing gameplay
+; state observed by movement, collision or spawning code.
+timex_saved_ship0_active: db 0
+timex_saved_ship1_active: db 0
+timex_saved_balloon_active: db 0
+timex_saved_fuel_active: db 0
+timex_saved_helicopter_active: db 0
+timex_saved_tank_active: db 0
+timex_bitmap_ship0_active: db 0
+timex_bitmap_ship0_x: db 0
+timex_bitmap_ship0_y: db 0
+timex_bitmap_ship1_active: db 0
+timex_bitmap_ship1_x: db 0
+timex_bitmap_ship1_y: db 0
+timex_deferred_cleared: db 0
+timex_deferred_drawn: db 0
+timex_ships_cleared: db 0
+timex_ships_drawn: db 0
+timex_attr_helicopter_active: db 0
+timex_attr_helicopter_x: db 0
+timex_attr_helicopter_y: db 0
+timex_attr_fuel_active: db 0
+timex_attr_fuel_x: db 0
+timex_attr_fuel_y: db 0
+timex_attr_balloon_active: db 0
+timex_attr_balloon_x: db 0
+timex_attr_balloon_y: db 0
+timex_attr_tank_active: db 0
+timex_attr_tank_x: db 0
+timex_attr_tank_y: db 0
+timex_attr_cleanup_overlap: db 0
 
 ; One-time cache builder scratch. Runtime blitters never use these fields.
 precompute_source: dw 0
@@ -5888,6 +8101,7 @@ slow_phase: db 0                 ; alternates 0/1 scroll for average 0.5 px
 fast_phase: db 0                 ; alternates 1/2 scroll for average 1.5 px
 joystick_state: db 0             ; sanitized Kempston bits 0..4
 ay_last_speed: db 255             ; avoids rewriting unchanged engine registers
+timex_ay_present: db 0            ; 1 only for a ROM-confirmed TC2068/TS2068
 shot_sound_timer: db 0            ; 17..0 software amplitude/frequency envelope
 shot_sound_period: db 80           ; larger AY period gives the requested lower shot
 explosion_sound_timer: db 0       ; channel C impact envelope, 16..0
@@ -5898,9 +8112,9 @@ ding_sound_period: db 160          ; normal refuel ping; full-tank ping uses 80
 ; Game/HUD state. Score digits live beside hud_text in writable constant data;
 ; direct ASCII carry makes a HUD refresh division-free.
 lives: db 2
-game_state: db 0                 ; 0=playing, 1=explosion, 2=game over
+game_state: db 0                 ; 0=playing, 1=explosion, 2=between games
 hud_dirty: db 1                  ; bit 0=lives, bit 1=score
-hud_initialized: db 0            ; GAME OVER clears the otherwise static line
+hud_initialized: db 0            ; wait screen clears the otherwise static panel
 hud_update_mask: db 0            ; saved bit mask while ROM glyphs are copied
 score_redraw_count: db 4         ; 1 normally, grows leftward when 9 carries
 hud_clear_y: db 0
@@ -5921,12 +8135,15 @@ object_attr_width: db 0
 object_attr_col: db 0
 object_attr_row: db 0
 object_attr_rows: db 0
+object_attr_y: db 0               ; exact pixel row in the Timex 8x1 painter
 fuel_attr_rows_remaining: db 0    ; custom F/U/E/L alternating-colour painter
-fuel_attr_phase: db 0             ; 0=white band, 1=magenta band
+fuel_attr_phase: db 0             ; even=magenta, odd=white (F/U/E/L)
 fuel_attr_repeat: db 0            ; handles an attribute boundary after midpoint
+timex_attr_y: db 0
+timex_color_phase: db 0
 
 ; Minimal ROM-font renderer scratch. Text is copied only for HUD changes and
-; the GAME OVER screen, so these bytes are intentionally not performance-hot.
+; the between-games screen, so these bytes are not performance-hot.
 text_cursor: dw 0
 text_remaining: db 0
 text_y: db 0
@@ -5934,6 +8151,9 @@ text_col: db 0
 font_source: dw 0
 font_row_y: db 0
 font_rows: db 0
+footer_index: db 0
+footer_timer: db 8
+footer_row_y: db 184
 
 
 ; Each array is page-aligned so an index can be installed directly in L.
@@ -5963,6 +8183,16 @@ player_shift_table:
     dw player_shift_data,player_shift_data+39,player_shift_data+78
     dw player_shift_data+117,player_shift_data+156,player_shift_data+195
     dw player_shift_data+234,player_shift_data+273
+player_left_shift_table:
+    dw player_left_shift_data,player_left_shift_data+39
+    dw player_left_shift_data+78,player_left_shift_data+117
+    dw player_left_shift_data+156,player_left_shift_data+195
+    dw player_left_shift_data+234,player_left_shift_data+273
+player_right_shift_table:
+    dw player_right_shift_data,player_right_shift_data+39
+    dw player_right_shift_data+78,player_right_shift_data+117
+    dw player_right_shift_data+156,player_right_shift_data+195
+    dw player_right_shift_data+234,player_right_shift_data+273
 enemy_plane_shift_table:
     dw enemy_plane_shift_data,enemy_plane_shift_data+24
     dw enemy_plane_shift_data+48,enemy_plane_shift_data+72
@@ -6016,6 +8246,8 @@ explosion_2_shift_table:
     dw explosion_2_shift_data+234,explosion_2_shift_data+273
 
 player_shift_data: ds 312,0
+player_left_shift_data: ds 312,0
+player_right_shift_data: ds 312,0
 enemy_plane_shift_data: ds 192,0
 helicopter_shift_data: ds 240,0
 helicopter_alt_shift_data: ds 240,0

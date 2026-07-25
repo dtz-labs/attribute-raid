@@ -510,9 +510,18 @@ def main() -> int:
     )
     parser.add_argument("source", type=Path)
     parser.add_argument("outdir", type=Path)
+    parser.add_argument(
+        "--basename",
+        default="attribute-raid",
+        help="base name for generated BIN, TAP and MAP files",
+    )
     args = parser.parse_args()
 
-    defines = {"PROFILE_BORDER": 0}
+    defines = {
+        "PROFILE_BORDER": 0,
+        "TIMEX_HICOLOR": 0,
+        "PLAYFIELD_BOTTOM": 168,
+    }
     for item in args.define:
         if "=" in item:
             name, value = item.split("=", 1)
@@ -530,9 +539,12 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 1
 
-    bin_path = args.outdir / "attribute-raid.bin"
-    tap_path = args.outdir / "attribute-raid.tap"
-    map_path = args.outdir / "attribute-raid.map"
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", args.basename):
+        parser.error(f"bad output basename: {args.basename!r}")
+
+    bin_path = args.outdir / f"{args.basename}.bin"
+    tap_path = args.outdir / f"{args.basename}.tap"
+    map_path = args.outdir / f"{args.basename}.map"
 
     bin_path.write_bytes(code)
     write_tap(tap_path, code, origin)
