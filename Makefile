@@ -1,14 +1,25 @@
 .PHONY: all standard timex run run-48 run-timex run-tc2048 run-tc2068 \
-	run-ts2068 profile run-profile clean
+	run-ts2068 profile run-profile zesarux-config clean
 
 OUTDIR := build
 TAP := $(OUTDIR)/attribute-raid.tap
 TIMEX_TAP := $(OUTDIR)/attribute-raid-timex.tap
 DEFINES ?=
 ZESARUX ?= /Applications/ZEsarUX.app/Contents/MacOS/zesarux
-ZESARUX_FLAGS ?= --joystickemulated "Kempston"
+ZESARUX_CONFIG ?= $(abspath tools/zesarux.rc)
+ZESARUX_FLAGS ?=
 ZESARUX_MACHINE ?= 128k
 ZESARUX_DIR := $(dir $(ZESARUX))
+
+# --configfile must come first; it replaces ~/.zesaruxrc and carries the
+# joystick mapping. --nosplash/--nowelcomemessage skip the startup logo.
+ZESARUX_BASE = --configfile "$(ZESARUX_CONFIG)" --nosplash --nowelcomemessage \
+	--verbose 0
+
+define check-zesarux
+@test -x "$(ZESARUX)" || { echo "ZEsarUX binary not found: $(ZESARUX)" >&2; exit 1; }
+@test -f "$(ZESARUX_CONFIG)" || { echo "ZEsarUX config not found: $(ZESARUX_CONFIG)" >&2; exit 1; }
+endef
 
 all: $(TAP) $(TIMEX_TAP)
 
@@ -27,9 +38,9 @@ $(OUTDIR):
 	mkdir -p $(OUTDIR)
 
 run: standard
-	@test -x "$(ZESARUX)" || { echo "ZEsarUX binary not found: $(ZESARUX)" >&2; exit 1; }
-	cd "$(ZESARUX_DIR)" && ./zesarux --noconfigfile --machine $(ZESARUX_MACHINE) \
-		$(ZESARUX_FLAGS) --nosplash --verbose 0 "$(abspath $(TAP))"
+	$(check-zesarux)
+	cd "$(ZESARUX_DIR)" && ./zesarux $(ZESARUX_BASE) \
+		--machine $(ZESARUX_MACHINE) $(ZESARUX_FLAGS) "$(abspath $(TAP))"
 
 run-48:
 	$(MAKE) ZESARUX_MACHINE=48k run
@@ -37,21 +48,21 @@ run-48:
 run-timex: run-tc2068
 
 run-tc2048: timex
-	@test -x "$(ZESARUX)" || { echo "ZEsarUX binary not found: $(ZESARUX)" >&2; exit 1; }
-	cd "$(ZESARUX_DIR)" && ./zesarux --noconfigfile --machine TC2048 \
-		--enabletimexvideo $(ZESARUX_FLAGS) --nosplash --verbose 0 \
+	$(check-zesarux)
+	cd "$(ZESARUX_DIR)" && ./zesarux $(ZESARUX_BASE) \
+		--machine TC2048 --enabletimexvideo $(ZESARUX_FLAGS) \
 		"$(abspath $(TIMEX_TAP))"
 
 run-tc2068: timex
-	@test -x "$(ZESARUX)" || { echo "ZEsarUX binary not found: $(ZESARUX)" >&2; exit 1; }
-	cd "$(ZESARUX_DIR)" && ./zesarux --noconfigfile --machine TC2068 \
-		--enabletimexvideo $(ZESARUX_FLAGS) --nosplash --verbose 0 \
+	$(check-zesarux)
+	cd "$(ZESARUX_DIR)" && ./zesarux $(ZESARUX_BASE) \
+		--machine TC2068 --enabletimexvideo $(ZESARUX_FLAGS) \
 		"$(abspath $(TIMEX_TAP))"
 
 run-ts2068: timex
-	@test -x "$(ZESARUX)" || { echo "ZEsarUX binary not found: $(ZESARUX)" >&2; exit 1; }
-	cd "$(ZESARUX_DIR)" && ./zesarux --noconfigfile --machine TS2068 \
-		--enabletimexvideo $(ZESARUX_FLAGS) --nosplash --verbose 0 \
+	$(check-zesarux)
+	cd "$(ZESARUX_DIR)" && ./zesarux $(ZESARUX_BASE) \
+		--machine TS2068 --enabletimexvideo $(ZESARUX_FLAGS) \
 		"$(abspath $(TIMEX_TAP))"
 
 profile:
@@ -59,6 +70,22 @@ profile:
 
 run-profile:
 	$(MAKE) OUTDIR=build-profile DEFINES="-D PROFILE_BORDER=1" run
+
+# Re-copy the real joystick mapping from the global ZEsarUX config into
+# tools/zesarux.rc, keeping everything above the sentinel line intact.
+zesarux-config:
+	@test -f "$(HOME)/.zesaruxrc" || \
+		{ echo "No $(HOME)/.zesaruxrc to copy joystick settings from" >&2; exit 1; }
+	@joy=$$(grep -E '^--(joystick|realjoystick|steering-wheel)' "$(HOME)/.zesaruxrc" \
+			| grep -v '^--joystickemulated' | sed -e 's/[[:space:]]*$$//'); \
+	if [ -z "$$joy" ]; then \
+		echo "No joystick settings found in $(HOME)/.zesaruxrc" >&2; exit 1; \
+	fi; \
+	awk '{ print } /^;--- BEGIN generated/ { exit }' "$(ZESARUX_CONFIG)" \
+		> "$(ZESARUX_CONFIG).new"; \
+	printf '%s\n' "$$joy" >> "$(ZESARUX_CONFIG).new"; \
+	mv "$(ZESARUX_CONFIG).new" "$(ZESARUX_CONFIG)"; \
+	echo "Updated $(ZESARUX_CONFIG) from $(HOME)/.zesaruxrc"
 
 clean:
 	rm -rf build build-profile build-timex

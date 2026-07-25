@@ -48,8 +48,21 @@ make standard     # build only the 48K/128K TAP
 make timex        # build only the Timex 8x1 TAP
 make profile      # the border shows the duration of a complete game update
 make run-profile
+make zesarux-config  # re-copy the host joystick mapping from ~/.zesaruxrc
 make clean
 ```
+
+### Emulator configuration
+
+The `run*` targets start ZEsarUX with `--configfile tools/zesarux.rc` instead
+of the global `~/.zesaruxrc`, so runs are reproducible and never overwrite
+your own settings. That file holds the emulated Kempston joystick plus the
+host joystick/pad mapping, and the emulator is told not to save it on exit.
+
+Remap the pad in a normal ZEsarUX session (which writes `~/.zesaruxrc`), then
+run `make zesarux-config` to copy the mapping back into `tools/zesarux.rc`.
+Extra one-off flags can still be passed via `ZESARUX_FLAGS`, for example
+`make run ZESARUX_FLAGS="--zoom 3"`.
 
 `make run` selects a Spectrum 128K in ZEsarUX so the AY soundtrack is audible.
 The program remains safe on a stock 48K machine, but its AY port writes have no
