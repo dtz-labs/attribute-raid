@@ -43,6 +43,7 @@ start:
     call update_hud_if_dirty
     call paint_helicopter_attributes
     call paint_fuel_attributes
+    call paint_tank_attributes
     call draw_entities
     ei
 
@@ -75,6 +76,7 @@ main_loop:
     call restore_entities
     call restore_helicopter_attributes
     call restore_fuel_attributes
+    call restore_tank_attributes
 
     ld a,(speed_pixels)
     or a
@@ -99,6 +101,7 @@ course_not_scrolled:
     call update_hud_if_dirty
     call paint_helicopter_attributes
     call paint_fuel_attributes
+    call paint_tank_attributes
     call paint_crash_attributes
     call draw_entities
     call profile_end
@@ -106,6 +109,7 @@ course_not_scrolled:
 draw_updated_entities:
     call paint_helicopter_attributes
     call paint_fuel_attributes
+    call paint_tank_attributes
     call draw_entities
     call profile_end
     jr main_loop
@@ -151,6 +155,7 @@ reinitialize_demo:
     call update_hud_if_dirty
     call paint_helicopter_attributes
     call paint_fuel_attributes
+    call paint_tank_attributes
     call draw_entities
     ret
 
@@ -397,6 +402,63 @@ restore_fuel_attributes:
     ld a,(fuel_attr_rows_remaining)
     ld (object_attr_rows),a
     jp paint_object_attribute_cells
+
+paint_tank_attributes:
+    ; The shore tank is XORed over set land pixels, so its silhouette consists
+    ; of zero bits. Give those cut-outs black PAPER instead of ordinary blue;
+    ; otherwise the tank looks like corruption in the bank geometry.
+    ld a,(tank_active)
+    or a
+    ret z
+    call tank_attributes_overlap_road
+    ret nz
+    ld a,0x44                       ; BRIGHT green land over black tank cut-out
+    jr prepare_tank_attributes
+
+restore_tank_attributes:
+    ld a,(tank_active)
+    or a
+    ret z
+    call tank_attributes_overlap_road
+    ret nz
+    ld a,0x4c                       ; ordinary green land / blue water cells
+prepare_tank_attributes:
+    ld (object_attr_value),a
+    ld a,2                          ; byte-aligned 16-pixel tank
+    ld (object_attr_width),a
+    ld a,(tank_x)
+    srl a
+    srl a
+    srl a
+    ld (object_attr_col),a
+
+    ld a,(tank_y)
+    ld b,a
+    srl a
+    srl a
+    srl a
+    ld (object_attr_row),a
+    ld a,b
+    and 7
+    cp 7                            ; ten rows need a third cell at offset seven
+    ld a,2
+    jr nz,tank_attr_rows_ready
+    inc a
+tank_attr_rows_ready:
+    ld (object_attr_rows),a
+    jp paint_object_attribute_cells
+
+tank_attributes_overlap_road:
+    ; Road attributes already use black PAPER. Leave them under a shore tank
+    ; and, most importantly, never restore a road cell to the river palette.
+    ld a,(bridge_active)
+    ld b,a
+    ld a,(destroyed_road_active)
+    or b
+    ret z
+    ld a,(tank_y)
+    ld b,10
+    jp object_overlaps_bridge
 
 prepare_fuel_attribute_geometry:
     ; The bitmap scrolls every pixel, but standard Spectrum colour remains on
@@ -1082,6 +1144,10 @@ render_v3_row_indexed:
     ld (row_screen_addr),hl
 
     ; Left bank: land, partial edge, water.
+    ; calc_screen_line_addr clobbers L, so reload the circular block index.
+    ; The right-bank path already does this explicitly below.
+    ld a,(row_block_index)
+    ld l,a
     ld h,HIGH(block_left_col)
     ld d,(hl)
     ld h,HIGH(block_left_mask)
@@ -1503,23 +1569,23 @@ init_entities:
     ld a,140
     ld (helicopter_delay),a
 
-    ld a,112                         ; fully visible and clear of the player
+    ld a,8                           ; inactive depot will enter at the top
     ld (fuel_y),a
     call calc_safe_river_x
     and 0xf8                         ; vertical FUEL occupies one bitmap byte
     ld (fuel_x),a
-    ld a,1
-    ld (fuel_active),a
-    ld (fuel_refill_timer),a
     xor a
-    ld (fuel_delay),a
+    ld (fuel_active),a
     ld (fuel_refueling),a
+    ld (fuel_delay),a
+    inc a
+    ld (fuel_refill_timer),a
     ld a,48
     ld (fuel_level),a
     ld a,32
     ld (fuel_consume_timer),a
 
-    ld a,46
+    ld a,8                           ; first shore tank enters with the scenery
     ld (tank_y),a
     xor a
     ld (tank_side),a
@@ -3063,6 +3129,14 @@ update_fuel_waiting:
 spawn_fuel:
     ld a,8
     call choose_clear_fuel_y
+    cp 8
+    jr z,spawn_fuel_at_top
+    ; A crowded entrance used to move the depot to an arbitrary on-screen Y.
+    ; Wait instead, so FUEL always arrives from the top of the playfield.
+    ld a,8
+    ld (fuel_delay),a
+    jp consume_fuel
+spawn_fuel_at_top:
     ld (fuel_y),a
     call calc_safe_river_x
     and 0xf8
@@ -4792,6 +4866,7 @@ crash_wait_frame:
     call restore_entities
     call restore_helicopter_attributes
     call restore_fuel_attributes
+    call restore_tank_attributes
 
     ld a,(explosion_timer)
     dec a
@@ -4815,6 +4890,7 @@ store_explosion_frame:
 draw_crash_wait_frame:
     call paint_helicopter_attributes
     call paint_fuel_attributes
+    call paint_tank_attributes
     call paint_crash_attributes
     call draw_entities
     call profile_end

@@ -144,7 +144,8 @@ The current scene contains:
 - a destructible vertical 8×32 `F`/`U`/`E`/`L` depot with a white `F`, magenta
   `U`, white `E`, and magenta `L` background, which safely refuels the player
   on contact,
-- a periodic tank on the left or right bank, firing horizontally over water,
+- a periodic black tank on the left or right bank, firing horizontally over
+  water without resembling a blue hole in the bank,
 - a bridge and full-width road with a tank that either drives from one screen
   edge, across the approach and bridge, to the opposite edge, or stops before
   the entrance and fires into the river,
@@ -174,6 +175,8 @@ apart. Bridge-driven relocation uses the same check, preventing two ships or a
 ship and helicopter from being XORed into a composite silhouette. FUEL uses
 its complete 32-pixel height in both directions of this test: it avoids active
 ships and aircraft when it appears, and later respawns avoid the whole depot.
+If the entrance is occupied, the depot waits and retries instead of suddenly
+materialising farther down the river.
 
 The bridge is not erased in full while scrolling. Each frame restores only the
 1–2 scanlines leaving its top, adds new scanlines at the bottom, and refreshes
