@@ -6,7 +6,7 @@
 ; Scrolling is still pixel-smooth.  Instead of repainting all 192 scanlines,
 ; each frame updates only the rows which cross a block boundary (alternating
 ; between zero and 19 rows with the slow modifier, 19 at base speed, and 38
-; on the light two-pixel phases of adaptive fast mode). A fork is an optional
+; at fast speed). A fork is an optional
 ; land interval inside the river and is handled by the same dirty-row pass.
 ;
 ; Bitmap convention: 1 = green land/object, 0 = blue water/object cut-out.
@@ -49,6 +49,7 @@ start:
     call paint_fuel_attributes
     call paint_balloon_attributes
     call paint_tank_attributes
+    call paint_ship_attributes
     call draw_all_current_sprites_direct
     call show_ready_screen
     ei
@@ -153,6 +154,7 @@ update_frame_object_attributes:
     call paint_fuel_attributes
     call paint_balloon_attributes
     call paint_tank_attributes
+    call paint_ship_attributes
     jp cleanup_timex_saved_object_attributes
 #else
     jp update_standard_object_attributes
@@ -421,6 +423,7 @@ reinitialize_demo:
     call paint_fuel_attributes
     call paint_balloon_attributes
     call paint_tank_attributes
+    call paint_ship_attributes
     call draw_all_current_sprites_direct
     ret
 
@@ -756,6 +759,19 @@ timex_paint_helicopter_full:
     ld a,10
     ld (object_attr_rows),a
     jp timex_paint_object_rows
+#endif
+
+paint_ship_attributes:
+    ; The two wide ships copy the Atari hull's per-scanline colours, which
+    ; only the Timex 8x1 attribute file can follow. Standard 8x8 cells were
+    ; tried and rejected: the cell-boundary split flickers and reads mostly
+    ; red, so that build leaves the river attribute alone and the hulls keep
+    ; their single-ink look.
+#if TIMEX_HICOLOR
+    call paint_timex_ship0_attributes
+    jp paint_timex_ship1_attributes
+#else
+    ret
 #endif
 
 paint_fuel_attributes:
@@ -1383,6 +1399,11 @@ finish_wait_screen:
     ret
 
 game_over_frame:
+#if AUTOPILOT
+    ; Benchmark build: skip both waiting screens and start flying immediately.
+    call start_new_game
+    jp main_loop
+#endif
     ; Require a release after entering either waiting screen, then accept SPACE
     ; or Kempston FIRE as a clean edge for starting a new two-life game.
     call update_footer_scroller       ; movement is allowed only between games

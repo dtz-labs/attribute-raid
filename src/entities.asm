@@ -268,6 +268,11 @@ wait_for_enemy_plane:
     ld (enemy_plane_delay),a
     ret
 try_spawn_enemy_plane:
+    ; The crossing aircraft never shares a board with a bridge: while a span,
+    ; its queued course block or a destroyed road is around, keep waiting.
+    call bridge_scene_active
+    or a
+    jr nz,defer_enemy_plane_spawn
     call can_spawn_water_enemy
     or a
     jr z,defer_enemy_plane_spawn
@@ -747,6 +752,9 @@ refill_player_fuel:
     jp mark_fuel_hud_dirty
 
 consume_fuel:
+#if AUTOPILOT
+    ret                             ; the benchmark flight never runs dry
+#endif
     ld a,(fuel_consume_timer)
     dec a
     ld (fuel_consume_timer),a
@@ -952,7 +960,11 @@ wait_for_tank:
     ld (tank_delay),a
     ret
 spawn_tank:
-    xor a
+    ; New shore guns also stay off bridge boards; a live tank finishes its
+    ; run, but respawns wait until the road scene has fully passed.
+    call bridge_scene_active
+    or a
+    jr nz,defer_tank_spawn
     ld a,1
     ld (tank_active),a
     ld a,16
@@ -969,6 +981,22 @@ spawn_tank:
     ld (tank_x),a
     ld a,72
     ld (tank_fire_timer),a
+    ret
+defer_tank_spawn:
+    ld a,16
+    ld (tank_delay),a
+    ret
+
+bridge_scene_active:
+    ; A=nonzero while a bridge occupies or is queued for the scene: an intact
+    ; or pending span, or the destroyed road still scrolling through.
+    ld a,(bridge_spawn_pending)
+    ld b,a
+    ld a,(bridge_active)
+    or b
+    ld b,a
+    ld a,(destroyed_road_active)
+    or b
     ret
 
 maybe_fire_bridge_tank:
@@ -1198,7 +1226,6 @@ update_bridge:
     xor a
     call bridge_fill_rows
     call bridge_paint_road_attributes
-    call bridge_draw_initial_road_markings
     ret
 
 setup_bridge_tank:
@@ -1220,10 +1247,6 @@ advance_active_bridge:
     ld a,(speed_pixels)
     or a
     ret z
-
-    ; The dashed centre consists of two scanlines. Restore only the one or two
-    ; rows that cease to be its centre before moving the bridge envelope.
-    call bridge_restore_departing_road_markings
 
     ; Remove only the rows which leave the top. Clearing the broad band is
     ; followed by an exact bank/island reconstruction for those scanlines.
@@ -1285,24 +1308,15 @@ store_bridge_y:
     ; Repaint the ends which may have been touched by this frame's bank pass.
     ld a,(bridge_y)
     call bridge_refresh_edges
-    call bridge_draw_entering_road_markings
     ld a,0x4a                       ; intact bridge keeps BRIGHT blue paper
     ld (bridge_center_attr),a
     call bridge_update_attributes
     ret
 
-bridge_draw_initial_road_markings:
-    ld a,(bridge_y)
-    add a,7
-    call bridge_draw_road_marking_row
-    ld a,(bridge_y)
-    add a,8
-    jp bridge_draw_road_marking_row
-
 update_destroyed_road:
     ; After the span is blown away, both white approaches remain part of the
-    ; world and keep scrolling. Only their two dashed centre scanlines require
-    ; bitmap work; the remainder is ordinary bank data under white attributes.
+    ; world and keep scrolling. With no centre marking they need no bitmap
+    ; work at all: the approaches are ordinary land under white attributes.
     ld a,(destroyed_road_active)
     or a
     ret z
@@ -1312,31 +1326,9 @@ update_destroyed_road:
 
     ld b,a
     ld a,(bridge_y)
-    add a,7
-    ld (road_mark_y),a
-    ld a,b
-    ld (road_mark_rows),a
-destroyed_road_restore_loop:
-    ld a,(road_mark_y)
-    cp PLAYFIELD_BOTTOM
-    jr nc,destroyed_road_restore_next
-    call bridge_restore_destroyed_road_marking_row
-destroyed_road_restore_next:
-    ld a,(road_mark_y)
-    inc a
-    ld (road_mark_y),a
-    ld a,(road_mark_rows)
-    dec a
-    ld (road_mark_rows),a
-    jr nz,destroyed_road_restore_loop
-
-    ld a,(speed_pixels)
-    ld b,a
-    ld a,(bridge_y)
     add a,b
     ld (bridge_y),a
 
-    call bridge_draw_entering_destroyed_road_markings
     ld a,0x4c                       ; fixed BRIGHT-blue water after destruction
     ld (bridge_center_attr),a
     call bridge_update_attributes
@@ -1347,185 +1339,9 @@ destroyed_road_restore_next:
     ld (destroyed_road_active),a
     ret
 
-bridge_restore_destroyed_road_marking_row:
-    ; The broken span is already ordinary water. Only odd byte columns on the
-    ; two land approaches contain green road dashes, so restore those bytes to
-    ; solid land instead of clearing/rebuilding the complete 256-pixel row.
-    cp 16
-    ret c
-    cp PLAYFIELD_BOTTOM
-    ret nc
-    call calc_screen_line_addr
-    ld c,0
-    ld a,(bridge_col)
-    ld b,a
-    call bridge_restore_destroyed_road_segment
-
-    ld a,(bridge_width)
-    add a,l
-    ld l,a
-    ld a,(bridge_col)
-    ld c,a
-    ld a,(bridge_width)
-    add a,c
-    ld c,a
-    ld b,a
-    ld a,32
-    sub b
-    ld b,a
-    ; Fall through: HL and C point at the first right-approach byte.
-
-bridge_restore_destroyed_road_segment:
-    ld a,b
-    or a
-    ret z
-bridge_restore_destroyed_road_segment_byte:
-    ld a,c
-    and 1
-    jr z,bridge_restore_destroyed_road_segment_next
-    ld (hl),255
-bridge_restore_destroyed_road_segment_next:
-    inc l
-    inc c
-    djnz bridge_restore_destroyed_road_segment_byte
-    ret
-
-bridge_draw_destroyed_road_markings:
-    ld a,(bridge_y)
-    add a,7
-    call bridge_draw_destroyed_road_marking_row
-    ld a,(bridge_y)
-    add a,8
-    jp bridge_draw_destroyed_road_marking_row
-
-bridge_draw_entering_destroyed_road_markings:
-    ld a,(speed_pixels)
-    ld b,a
-    ld a,(bridge_y)
-    add a,9
-    sub b
-    ld (road_mark_y),a
-    ld a,b
-    ld (road_mark_rows),a
-destroyed_road_draw_loop:
-    ld a,(road_mark_y)
-    call bridge_draw_destroyed_road_marking_row
-    ld a,(road_mark_y)
-    inc a
-    ld (road_mark_y),a
-    ld a,(road_mark_rows)
-    dec a
-    ld (road_mark_rows),a
-    jr nz,destroyed_road_draw_loop
-    ret
-
-bridge_draw_destroyed_road_marking_row:
-    ; Input A=Y. Draw alternating black gaps only over the two land approaches;
-    ; the former bridge span stays untouched blue water.
-    cp 16
-    ret c
-    cp PLAYFIELD_BOTTOM
-    ret nc
-    call calc_screen_line_addr
-    ld c,0
-    ld a,(bridge_col)
-    ld b,a
-    call bridge_draw_road_segment
-
-    ld a,(bridge_width)
-    add a,l
-    ld l,a
-    ld a,(bridge_col)
-    ld c,a
-    ld a,(bridge_width)
-    add a,c
-    ld c,a
-    ld b,a
-    ld a,32
-    sub b
-    ld b,a
-    jp bridge_draw_road_segment
-
-bridge_draw_road_segment:
-    ; Input HL=first byte, B=count, C=absolute byte column.
-    ld a,b
-    or a
-    ret z
-bridge_draw_road_segment_byte:
-    ld a,c
-    and 1
-    jr z,bridge_draw_road_segment_white
-    xor a
-    jr bridge_store_road_segment_byte
-bridge_draw_road_segment_white:
-    ld a,255
-bridge_store_road_segment_byte:
-    ld (hl),a
-    inc l
-    inc c
-    djnz bridge_draw_road_segment_byte
-    ret
-
-bridge_restore_departing_road_markings:
-    ld a,(bridge_y)
-    add a,7
-    ld (road_mark_y),a
-    ld a,(speed_pixels)
-    ld (road_mark_rows),a
-bridge_restore_road_row:
-    ld a,(road_mark_y)
-    call bridge_erase_road_marking_row
-    ld a,(road_mark_y)
-    inc a
-    ld (road_mark_y),a
-    ld a,(road_mark_rows)
-    dec a
-    ld (road_mark_rows),a
-    jr nz,bridge_restore_road_row
-    ret
-
-bridge_erase_road_marking_row:
-    ; Gap bytes are already 0xff. Only the sixteen former green dash bytes
-    ; need restoring, halving writes on the bridge's hot scrolling path.
-    cp 16
-    ret c
-    cp PLAYFIELD_BOTTOM
-    ret nc
-    call calc_screen_line_addr
-    inc l
-    ld b,16
-bridge_erase_road_dash:
-    ld (hl),255
-    inc l
-    inc l
-    djnz bridge_erase_road_dash
-    ret
-
-bridge_draw_entering_road_markings:
-    ; New centre starts at bridge_y+9-speed: +8 at 1 px, +7 at 2 px.
-    ld a,(speed_pixels)
-    ld b,a
-    ld a,(bridge_y)
-    add a,9
-    sub b
-    ld (road_mark_y),a
-    ld a,b
-    ld (road_mark_rows),a
-bridge_draw_entering_road_row:
-    ld a,(road_mark_y)
-    call bridge_draw_road_marking_row
-    ld a,(road_mark_y)
-    inc a
-    ld (road_mark_y),a
-    ld a,(road_mark_rows)
-    dec a
-    ld (road_mark_rows),a
-    jr nz,bridge_draw_entering_road_row
-    ret
-
 bridge_fill_full_bitmap_row:
     ; Input A=Y, C=byte. Road rows are inside a bridge band, so land plus
-    ; bridge makes the complete 256-pixel scanline solid before dash cutting.
+    ; bridge makes the complete 256-pixel scanline solid.
     cp 16
     ret c
     cp PLAYFIELD_BOTTOM
@@ -1551,23 +1367,6 @@ bridge_full_bitmap_byte:
     ld (hl),a
     inc l
     djnz bridge_full_bitmap_byte
-    ret
-
-bridge_draw_road_marking_row:
-    ; Input A=Y. The intact bridge/road row is already solid 0xff, so write
-    ; only the sixteen green dash bytes instead of redundantly storing all 32.
-    cp 16
-    ret c
-    cp PLAYFIELD_BOTTOM
-    ret nc
-    call calc_screen_line_addr
-    inc l
-    ld b,16
-bridge_road_dash_byte:
-    ld (hl),0
-    inc l
-    inc l
-    djnz bridge_road_dash_byte
     ret
 
 update_bullet:
@@ -1661,9 +1460,9 @@ move_bullet_up:
     ret
 
 bullet_checks_destroyed_road:
-    ; White approaches keep scrolling after the bridge span is gone. Their
-    ; green dashed pixels are zero bits but not blue water, so geometry must
-    ; reject a projectile there before the normal bitmap-only test.
+    ; White approaches keep scrolling after the bridge span is gone. They are
+    ; solid land in the bitmap, so this explicit band test only keeps the
+    ; award/impact semantics of hitting a road distinct from a plain bank.
     ld a,(destroyed_road_active)
     or a
     jp z,bullet_hits_background
@@ -1704,7 +1503,11 @@ bullet_checks_destroyed_road:
 
 bullet_hits_background:
     ; Query pure world geometry rather than the framebuffer, which intentionally
-    ; still contains resident sprites. Actors were tested explicitly above.
+    ; still contains resident sprites. Actors were tested explicitly above, and
+    ; this path never overlaps an intact bridge/road band, so course blocks are
+    ; the only geometry layer. A block shares one terrain row across its eight
+    ; scanlines, so the ten-line swept interval needs at most three block tests
+    ; instead of a byte pair per scanline.
     ld a,(bullet_x)
     add a,7
     ld c,a
@@ -1728,35 +1531,46 @@ bullet_hits_background:
     ld (bullet_background_y),a
     ld a,10
     ld (bullet_background_rows),a
-bullet_background_row:
+bullet_background_block:
     ld a,(bullet_background_y)
     cp PLAYFIELD_BOTTOM
     jr nc,bullet_background_collision
+    call get_block_index_for_y
     ld a,(bullet_background_col)
     ld c,a
-    ld a,(bullet_background_y)
-    call get_world_background_byte
+    ld a,l
+    call block_bitmap_address
+    ld a,(hl)
     ld b,a
     ld a,(bullet_background_mask_0)
     and b
     jr nz,bullet_background_collision
-    ld a,(bullet_background_col)
-    inc a
-    ld c,a
-    ld a,(bullet_background_y)
-    call get_world_background_byte
+    inc hl
+    ld a,(hl)
     ld b,a
     ld a,(bullet_background_mask_1)
     and b
     jr nz,bullet_background_collision
+    ; Skip straight to the first scanline of the next course block.
+    ld a,(course_phase)
+    ld b,a
     ld a,(bullet_background_y)
-    inc a
-    ld (bullet_background_y),a
+    add a,7
+    sub b
+    and 7
+    ld b,a
+    ld a,8
+    sub b                           ; scanlines left in this block: 1..8
+    ld b,a
     ld a,(bullet_background_rows)
-    dec a
+    sub b
+    ret z
+    ret c                           ; swept interval ends inside this block
     ld (bullet_background_rows),a
-    jr nz,bullet_background_row
-    ret
+    ld a,(bullet_background_y)
+    add a,b
+    ld (bullet_background_y),a
+    jr bullet_background_block
 bullet_background_collision:
     xor a
     ld (bullet_active),a
@@ -2036,8 +1850,8 @@ destroy_bridge_restore:
     cp PLAYFIELD_BOTTOM
     jr nc,destroy_bridge_done
     ; render_v3_row normally assumes that all bank interiors are already set.
-    ; Road dashes violate that invariant, so clear the complete scanline and
-    ; use the deliberately slower full-row world reconstruction here.
+    ; The solid span violates that invariant, so clear the complete scanline
+    ; and use the deliberately slower full-row world reconstruction here.
     ld c,0
     call bridge_fill_full_bitmap_row
     ld a,(bridge_restore_y)
@@ -2054,9 +1868,7 @@ destroy_bridge_done:
     ld (bridge_active),a
     ld a,1
     ld (destroyed_road_active),a
-    call preserve_road_tank_after_bridge
-    call bridge_draw_destroyed_road_markings
-    ret
+    jp preserve_road_tank_after_bridge
 
 preserve_road_tank_after_bridge:
     ; destroy_bridge_tank_bonus has already removed a mode-1 tank if it was on
@@ -2205,7 +2017,7 @@ check_fuel_bridge:
 check_shore_tank_bridge:
     ; The bridge owns its road and its dedicated bridge tank. A shore gun that
     ; reaches the same vertical band leaves cleanly instead of being composited
-    ; over road markings.
+    ; over the road.
     ld a,(tank_active)
     or a
     ret z
@@ -2258,6 +2070,9 @@ relocate_fuel:
     ret
 
 check_player_collision:
+#if AUTOPILOT
+    ret                             ; the benchmark flight is invulnerable
+#endif
     ; The shell uses the same forgiving 6x6 player core as moving enemies,
     ; but its collision rectangle is the actual two-pixel projectile. Explicit
     ; actor checks precede the pure bank/island/bridge geometry test. The common

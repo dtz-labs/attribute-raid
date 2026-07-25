@@ -26,6 +26,9 @@ init_entities:
     ld (ship0_active),a
     xor a
     ld (ship0_delay),a
+    ; A restart repaints the whole colour field, so the previous life's ship
+    ; footprint must not satisfy the attribute pass's "unchanged" test.
+    ld (timex_bitmap_ship0_active),a
 
     ld a,92
     ld (ship1_y),a
@@ -37,6 +40,7 @@ init_entities:
     ld (ship1_timer),a
     xor a
     ld (ship1_active),a
+    ld (timex_bitmap_ship1_active),a
     ld a,80
     ld (ship1_delay),a
 
@@ -127,7 +131,6 @@ init_entities:
     ld (hit_explosion_active),a
     ld (explosion_sound_timer),a
     ld (slow_phase),a
-    ld (fast_phase),a
     ld (joystick_state),a
     ld a,1
     ld (requested_speed),a
@@ -222,6 +225,8 @@ cleanup_timex_saved_object_attributes:
     ; the whole old rectangle here would briefly turn the moving sprite green.
     ld a,0x4c
     ld (object_attr_value),a
+    call cleanup_timex_saved_ship0_attributes
+    call cleanup_timex_saved_ship1_attributes
     call cleanup_timex_saved_helicopter_attributes
     call cleanup_timex_saved_fuel_attributes
     call cleanup_timex_saved_balloon_attributes
@@ -1914,9 +1919,61 @@ transition_shell_direct:
     call cleanup_resident_sprite_delta
     jp draw_current_shell_direct
 transition_shell_same_kind:
+    ; A flying shell is at most two bytes on two rows and always sits over
+    ; water, so restore its old footprint with direct zero writes and redraw.
+    ; The general rectangle-overlap engine stays for the taller splash and
+    ; for the projectile<->splash change handled above.
+    ld a,(tank_shell_active)
+    cp 1
+    jr nz,transition_shell_general
+    ld a,(transition_old_y)
+    ld b,a
+    call restore_flying_shell_row
+    ld a,(transition_old_y)
+    inc a
+    ld b,a
+    call restore_flying_shell_row
+    jp draw_current_shell_direct
+transition_shell_general:
     call prepare_new_shell_geometry
     call cleanup_resident_sprite_delta
     jp draw_current_shell_direct
+
+restore_flying_shell_row:
+    ; B = scanline of the old flying-shell image. Rows inside an intact
+    ; bridge band belong to the bridge writer and are skipped, exactly like
+    ; fill_water_rect_preserve_bridge.
+    ld a,(bridge_active)
+    or a
+    jr z,restore_flying_shell_clip
+    ld a,(bridge_y)
+    ld c,a
+    ld a,b
+    cp c
+    jr c,restore_flying_shell_clip
+    ld a,c
+    add a,16
+    cp b
+    jr c,restore_flying_shell_clip
+    jr z,restore_flying_shell_clip
+    ret
+restore_flying_shell_clip:
+    ld a,b
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    call calc_screen_line_addr
+    ld a,(transition_old_col)
+    add a,l
+    ld l,a
+    xor a
+    ld (hl),a
+    ld a,(transition_old_width)
+    cp 2
+    ret c
+    inc l
+    xor a
+    ld (hl),a
+    ret
 
 transition_all_resident_sprites:
     ; Common bitmap engine for Spectrum and Timex. The bridge/world layer has
@@ -2122,8 +2179,8 @@ get_world_background_byte:
     cp PLAYFIELD_BOTTOM
     jr nc,world_background_water
 
-    ; An intact bridge/road is the lower world layer. Its two centre rows use
-    ; the same alternating full-byte marking as the incremental bridge writer.
+    ; An intact bridge/road is the lower world layer: sixteen solid rows
+    ; with no centre marking.
     ld a,(bridge_active)
     or a
     jr z,world_background_course
@@ -2135,37 +2192,11 @@ get_world_background_byte:
     sub b
     cp 16
     jr nc,world_background_course
-    cp 7
-    jr z,world_background_bridge_mark
-    cp 8
-    jr z,world_background_bridge_mark
-    ld a,255
-    ret
-world_background_bridge_mark:
-    ld a,(background_query_col)
-    and 1
-    jr nz,world_background_water
     ld a,255
     ret
 
 world_background_course:
-    ld a,(background_query_y)
-    ld b,a
-    ld a,(background_cache_y)
-    cp b
-    jr z,world_background_index_cached
-    ld a,b
-    call get_block_index_for_y
-    ld a,l
-    ld (background_cache_index),a
-    ld a,(background_query_y)
-    ld (background_cache_y),a
-    jr world_background_index_ready
-world_background_index_cached:
-    ld a,(background_cache_index)
-    ld l,a
-world_background_index_ready:
-    ld a,l                          ; cached course block index
+    call resolve_course_block_index
     ld b,a
     ld a,(background_query_col)
     ld c,a
@@ -2176,6 +2207,49 @@ world_background_index_ready:
 
 world_background_water:
     xor a
+    ret
+
+resolve_course_block_index:
+    ; background_query_y -> A = course block index through the row cache.
+    ; The per-row sprite writers walk Y sequentially, and a block spans eight
+    ; scanlines, so a Y+1 query usually stays in the cached block and skips
+    ; the full circular-index computation.
+    ld a,(background_query_y)
+    ld b,a
+    ld a,(background_cache_y)
+    cp b
+    jr z,resolve_block_cached
+    inc a
+    cp b
+    jr nz,resolve_block_recompute
+    ld a,(background_cache_rows_left)
+    dec a
+    jr z,resolve_block_recompute    ; Y+1 starts the next block
+    ld (background_cache_rows_left),a
+    ld a,b
+    ld (background_cache_y),a
+resolve_block_cached:
+    ld a,(background_cache_index)
+    ret
+resolve_block_recompute:
+    ; get_block_index_for_y clobbers B and C; reload Y from the query slot.
+    ld a,b
+    call get_block_index_for_y
+    ld a,l
+    ld (background_cache_index),a
+    ld a,(course_phase)
+    ld c,a
+    ld a,(background_query_y)
+    add a,7
+    sub c
+    and 7
+    ld c,a
+    ld a,8
+    sub c
+    ld (background_cache_rows_left),a
+    ld a,(background_query_y)
+    ld (background_cache_y),a
+    ld a,(background_cache_index)
     ret
 
 load_world_background_triplet:
@@ -2202,56 +2276,14 @@ load_world_background_triplet:
     sub b
     cp 16
     jr nc,world_triplet_course
-    cp 7
-    jr z,world_triplet_bridge_mark
-    cp 8
-    jr z,world_triplet_bridge_mark
     ld a,255
     ld (world_background_byte_0),a
     ld (world_background_byte_1),a
-    ld (world_background_byte_2),a
-    ret
-
-world_triplet_bridge_mark:
-    ld a,(background_query_col)
-    and 1
-    jr nz,world_triplet_bridge_mark_odd
-    ld a,255
-    ld (world_background_byte_0),a
-    xor a
-    ld (world_background_byte_1),a
-    dec a
-    ld (world_background_byte_2),a
-    ret
-world_triplet_bridge_mark_odd:
-    xor a
-    ld (world_background_byte_0),a
-    dec a
-    ld (world_background_byte_1),a
-    inc a
     ld (world_background_byte_2),a
     ret
 
 world_triplet_course:
-    ld a,(background_query_y)
-    ld b,a
-    ld a,(background_cache_y)
-    cp b
-    jr z,world_triplet_index_cached
-    ld a,b
-    call get_block_index_for_y
-    ld a,l
-    ld (background_cache_index),a
-    ld a,(background_query_y)
-    ld (background_cache_y),a
-    jr world_triplet_index_ready
-world_triplet_index_cached:
-world_triplet_index_ready:
-    ; On a cache miss A currently contains background_query_y because it was
-    ; just copied into background_cache_y. Reload the actual block index for
-    ; both paths; treating Y as an index walked past block_bitmap_rows and
-    ; composed player/crossing-plane rows from unrelated sprite/state bytes.
-    ld a,(background_cache_index)
+    call resolve_course_block_index
     ld b,a
     ld a,(background_query_col)
     ld c,a
@@ -2638,9 +2670,8 @@ write_water_shifted_4_done:
 
 write_intact_bridge_tank_shifted_2xn:
     ; Input A=Y, C=pixel X, B=10, DE=shift table. An active bridge tank always
-    ; occupies bridge-relative rows 3..12. Most underlying bytes are solid road
-    ; (0xff); sprite rows 4/5 cross the two dashed centre scanlines and use the
-    ; known alternating 0xff/0x00 pattern. This avoids ten general world queries.
+    ; occupies bridge-relative rows 3..12, and with no centre marking every
+    ; underlying byte is solid road (0xff). This avoids ten world queries.
     cp PLAYFIELD_BOTTOM
     ret nc
     ld l,a
@@ -2688,12 +2719,6 @@ bridge_tank_direct_row:
     ld a,c
     add a,l
     ld l,a
-    ld a,(bridge_tank_write_row)
-    cp 4
-    jr z,bridge_tank_dashed_row
-    cp 5
-    jr z,bridge_tank_dashed_row
-
     ld a,(de)
     xor 255
     ld (hl),a
@@ -2711,47 +2736,6 @@ bridge_tank_direct_row:
     xor 255
     ld (hl),a
 bridge_tank_solid_skip_spill:
-    inc de
-    jr bridge_tank_direct_next_row
-
-bridge_tank_dashed_row:
-    ld a,c
-    and 1
-    jr nz,bridge_tank_dashed_odd
-    ld a,(de)
-    xor 255
-    ld (hl),a
-    inc de
-    inc l
-    ld a,(de)
-    ld (hl),a
-    inc de
-    inc l
-    ld a,(sprite_write_spill)
-    or a
-    jr z,bridge_tank_dashed_skip_even_spill
-    ld a,(de)
-    xor 255
-    ld (hl),a
-bridge_tank_dashed_skip_even_spill:
-    inc de
-    jr bridge_tank_direct_next_row
-bridge_tank_dashed_odd:
-    ld a,(de)
-    ld (hl),a
-    inc de
-    inc l
-    ld a,(de)
-    xor 255
-    ld (hl),a
-    inc de
-    inc l
-    ld a,(sprite_write_spill)
-    or a
-    jr z,bridge_tank_dashed_skip_odd_spill
-    ld a,(de)
-    ld (hl),a
-bridge_tank_dashed_skip_odd_spill:
     inc de
 
 bridge_tank_direct_next_row:

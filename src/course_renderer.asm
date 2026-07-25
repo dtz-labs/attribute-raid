@@ -30,6 +30,7 @@ init_course:
     ld (next_feature),a
     ld (bridge_spawn_pending),a
     ld (bridge_width_mode),a
+    ld (bridge_straight_blocks),a
     ld a,255
     ld (generated_island_left),a
     ld (generated_island_right),a
@@ -67,6 +68,18 @@ generate_next_block:
 generate_block:
     call update_course_motion
 
+    ; Only the few blocks entering just above the span stay straight: the
+    ; counter set at bridge generation skips applying the steps (they are
+    ; preserved, not zeroed - zeroing once left half_step dead after a narrow
+    ; bridge and no later feature could ever trigger again). Once the counter
+    ; runs out the river resumes bending even while the board is on screen.
+    ld a,(bridge_straight_blocks)
+    or a
+    jr z,generate_block_banks_move
+    dec a
+    ld (bridge_straight_blocks),a
+    jp generate_block_banks_frozen
+generate_block_banks_move:
     ld a,(gen_center_x)
     ld b,a
     ld a,(center_step)
@@ -127,6 +140,7 @@ center_x_not_low:
     ld a,255
     ld (center_step),a
 center_x_ready:
+generate_block_banks_frozen:
 
     call update_course_feature
 
@@ -434,6 +448,20 @@ block_delta_address:
     ret
 
 update_course_motion:
+    ; Only the bridge's immediate vicinity keeps straight banks: stop the
+    ; meander for the last few blocks below a scheduled bridge, while the
+    ; symmetric width logic still runs so the deliberately narrow bridge
+    ; variant keeps working. Further from the span the river bends normally.
+    ld a,(next_feature)
+    or a
+    jr z,course_motion_free
+    ld a,(feature_countdown)
+    cp 5
+    jr nc,course_motion_free
+    xor a
+    ld (center_step),a
+    ret
+course_motion_free:
     ld a,(motion_timer)
     or a
     jr z,pick_course_motion
@@ -524,6 +552,8 @@ generate_bridge_now:
     ld (bridge_width_mode),a
     ld a,1
     ld (bridge_spawn_pending),a
+    ld a,4                          ; keep the next few blocks above it straight
+    ld (bridge_straight_blocks),a
     ld a,24
     ld (feature_countdown),a
     ret

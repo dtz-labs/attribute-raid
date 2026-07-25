@@ -22,6 +22,7 @@ feature_countdown: db 40
 fork_step: db 0
 next_feature: db 0
 bridge_spawn_pending: db 0
+bridge_straight_blocks: db 0     ; blocks above a new span generated straight
 generated_island_left: db 255
 generated_island_right: db 255   ; 255 in both island fields means no fork
 
@@ -128,8 +129,6 @@ bridge_center_attr: db 0x4a       ; BRIGHT red intact span or normal water
 bridge_edge_residue: db 0         ; dirty modulo-eight class under the bridge
 bridge_edge_residues: db 0        ; remaining classes: one per scroll pixel
 bridge_edge_y: db 0               ; first of two bridge rows in that class
-road_mark_y: db 0
-road_mark_rows: db 0
 dirty_old_island_left: db 255
 dirty_old_island_right: db 255
 dirty_new_island_left: db 255
@@ -180,6 +179,7 @@ background_query_y: db 0
 background_query_col: db 0
 background_cache_y: db 255
 background_cache_index: db 0
+background_cache_rows_left: db 0 ; rows sharing the cached block, incl. cached Y
 world_background_byte_0: db 0
 world_background_byte_1: db 0
 world_background_byte_2: db 0
@@ -226,6 +226,7 @@ timex_attr_tank_active: db 0
 timex_attr_tank_x: db 0
 timex_attr_tank_y: db 0
 timex_attr_cleanup_overlap: db 0
+timex_ship_base_y: db 0          ; hull top Y shared by the three colour bands
 
 ; One-time cache builder scratch. Runtime blitters never use these fields.
 precompute_source: dw 0
@@ -236,7 +237,6 @@ precompute_rows: db 0
 precompute_shift: db 0
 requested_speed: db 1            ; raw Q/A/Kempston request before 0.5x phase
 slow_phase: db 0                 ; alternates 0/1 scroll for average 0.5 px
-fast_phase: db 0                 ; alternates 1/2 scroll for average 1.5 px
 joystick_state: db 0             ; sanitized Kempston bits 0..4
 ay_last_speed: db 255             ; avoids rewriting unchanged engine registers
 timex_ay_present: db 0            ; 1 only for a ROM-confirmed TC2068/TS2068

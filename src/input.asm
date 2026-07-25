@@ -3,10 +3,39 @@
 ; ---------------------------------------------------------------------------
 
 read_keyboard:
+#if AUTOPILOT
+    ; Benchmark build: fly straight at permanent fast scroll and refire the
+    ; moment the bullet slot frees up; the physical inputs are ignored.
+    xor a
+    ld (player_move),a
+    ld (joystick_state),a
+    ld (slow_phase),a
+    ld a,2
+    ld (requested_speed),a
+    ld (speed_pixels),a
+    ld a,(bullet_active)
+    or a
+    ret nz
+    ld a,(fire_pending)
+    or a
+    ret nz
+    ld a,(player_x)
+    ld (bullet_x),a
+    ld a,(player_y)
+    sub 4
+    ld (bullet_y),a
+    ld a,17                         ; 16 audible AY frames plus final mute
+    ld (shot_sound_timer),a
+    ld a,80                         ; lower initial pitch; period rises per frame
+    ld (shot_sound_period),a
+    ld a,1
+    ld (fire_pending),a
+    ret
+#endif
     xor a
     ld (player_move),a
 
-    ; Base speed is 1 px/frame. Q requests adaptive fast scrolling; A requests
+    ; Base speed is 1 px/frame. Q requests fast scrolling; A requests
     ; 0.5 px by alternating zero- and one-pixel scroll frames.
     ld a,1
     ld (requested_speed),a
@@ -60,62 +89,22 @@ resolve_requested_speed:
     cp 2
     jr z,resolve_fast_speed
 
-    ; Normal speed also resets both fractional cadence generators.
+    ; Normal speed also resets the slow cadence generator.
     ld (speed_pixels),a
     xor a
     ld (slow_phase),a
-    ld (fast_phase),a
     jr read_steering
 
 resolve_fast_speed:
-    ; Two-pixel scrolling doubles the bank pass from 19 to 38 scanlines. Never
-    ; combine that peak with a tank, bridge/road repair or either projectile.
-    ; In a light scene alternate 1/2 pixels for a 1.5 px average; a heavy scene
-    ; is capped at one pixel so every frame retains enough 50 Hz headroom.
-    ld a,(bridge_active)
-    or a
-    jr nz,resolve_heavy_fast_speed
-    ld a,(destroyed_road_active)
-    or a
-    jr nz,resolve_heavy_fast_speed
-    ld a,(tank_active)
-    or a
-    jr nz,resolve_heavy_fast_speed
-    ld a,(bridge_tank_active)
-    or a
-    jr nz,resolve_heavy_fast_speed
-    ld a,(enemy_plane_active)
-    or a
-    jr nz,resolve_heavy_fast_speed
-    ld a,(bullet_active)
-    or a
-    jr nz,resolve_heavy_fast_speed
-    ld a,(tank_shell_active)
-    or a
-    jr nz,resolve_heavy_fast_speed
-
-    ld a,(fast_phase)
-    ld b,a
-    xor 1
-    ld (fast_phase),a
-    ld a,b
-    inc a                           ; phase 0/1 resolves to 1/2 pixels
+    ; Fast scroll is a flat 2 px/frame in every scene, so the bank pass runs
+    ; its 38-scanline worst case on each fast frame.
+    ld a,2
     ld (speed_pixels),a
     xor a
     ld (slow_phase),a
-    jr read_steering
-
-resolve_heavy_fast_speed:
-    ld a,1
-    ld (speed_pixels),a
-    xor a
-    ld (slow_phase),a
-    ld (fast_phase),a
     jr read_steering
 
 resolve_slow_speed:
-    xor a
-    ld (fast_phase),a
     ld a,(slow_phase)
     ld (speed_pixels),a
     xor 1

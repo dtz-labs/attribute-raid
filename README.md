@@ -106,9 +106,7 @@ labels beginning with `%%`. `make` tracks every included assembly file.
 
 - `O` / `P` — move the player aircraft left / right at 2 px per frame,
 - no speed key — base scrolling speed of 1 px per frame,
-- hold `Q` — adaptive fast scrolling: 1/2 px alternating (1.5 px average) in
-  light scenes, capped at 1 px while a tank, crossing aircraft, bridge, road,
-  or projectile is active,
+- hold `Q` — fast scrolling: a flat 2 px per frame in every scene,
 - hold `A` — temporarily reduce scrolling to an average of 0.5 px per frame,
 - `SPACE` — fire,
 - `R` — start a new game with two lives, a zero score, and a new course.
@@ -142,8 +140,10 @@ normally replays only that list instead of repeating bank/island comparisons.
 An island is a third land interval inside the river. It grows over consecutive
 blocks, maintains its width, and then narrows, creating a real fork without a
 second renderer or screen buffer. The bridge remains a separate object. It
-matches the current river width and is 16 scanlines high. A white road with a
-two-scanline dashed centre marking extends across the land on both sides.
+matches the current river width and is 16 scanlines high. A plain white road
+with no centre marking extends across the land on both sides, and the course
+generator keeps both banks straight in the span's immediate vicinity - a few
+blocks below and above it - while the rest of the river bends normally.
 
 The first two character rows are a blank black upper margin. The river occupies
 152 scanlines (`Y=16..167`). The final three character rows form a fixed status
@@ -208,7 +208,10 @@ The current scene contains:
 - the player aircraft controlled with `O` / `P`,
 - two 32-pixel-wide ships: one remains fixed on the X axis, while the other
   patrols by one real pixel every two frames and uses a horizontally reflected
-  cache whenever it travels left, so its bow always faces its movement,
+  cache whenever it travels left, so its bow always faces its movement; the
+  Timex build colours each hull scanline like the Atari `ShipCol` table —
+  black mast and superstructure, red upper hull, cyan waterline — while the
+  standard build keeps the single river ink to avoid an attribute rectangle,
 - an aircraft crossing all 256 screen pixels at 3 px per frame; its Y position
   scrolls with the course, so it remains on the world line where it appeared;
   once shot down it stays absent until the scene is restarted,
@@ -241,7 +244,7 @@ FUEL occupy guaranteed water; the shore tank occupies full land. Their final
 rows can therefore be stored directly, including transparent zeroes. The
 player, crossing aircraft and bridge tank combine cached masks with a
 materialized terrain row before storing the final bytes, so they do not cut a
-bank edge or road marking. A scrolling actor restores only departing top rows
+bank edge or the road. A scrolling actor restores only departing top rows
 and any exposed side byte before writing its new shape; it is never blanked as
 a whole between frames. The bridge likewise updates only entering/departing
 rows and moving edge details. XOR is reserved for explosions.
@@ -353,12 +356,11 @@ deliberately narrow section (at most roughly 112 pixels of water), so not every
 crossing is generated over a broad river.
 
 Destroying a bridge clears all 16 affected bitmap scanlines before rebuilding
-the complete banks, island, and river. The brown centre span becomes blue
-water, while the white road approaches and their green dashed markings remain
-on both banks and keep scrolling down with the world. A dedicated full-row repair
-path is used when each dashed line leaves the road; the normal dirty renderer
-updates only bank edges and therefore cannot reconstruct a row which has been
-cleared completely.
+the complete banks, island, and river; the normal dirty renderer updates only
+bank edges and therefore cannot reconstruct a row which has been cleared
+completely. The brown centre span becomes blue water, while the white road
+approaches remain on both banks and keep scrolling down with the world without
+any further bitmap work.
 
 ## AY sound
 
@@ -411,11 +413,9 @@ only the two terrain residues touched at normal speed (four on a two-pixel
 phase). Full player composition is reserved for X/pose changes and bridge-road
 overlap.
 
-The interactive fast mode does not combine a two-pixel bank pass with a tank,
-crossing aircraft, bridge/road repair, or either projectile. Light frames
-alternate one and two pixels; heavy frames are capped at one. The profiling
-border covers input and AY work as well as rendering, so Q-specific regressions
-remain visible.
+The interactive fast mode scrolls a flat 2 px per frame in every scene; there
+is no heavy-scene cap. The profiling border covers input and AY work as well
+as rendering, so Q-specific regressions remain visible.
 
 Every active frame begins with `HALT`, synchronized to the display interrupt.
 Both builds keep ordinary bitmaps resident; Timex then advances its 8×1
