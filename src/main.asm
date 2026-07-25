@@ -4,16 +4,17 @@
 ; block is eight world scanlines high and both banks move in four-pixel steps.
 ; Scrolling is still pixel-smooth.  Instead of repainting all 192 scanlines,
 ; each frame updates only the rows which cross a block boundary (alternating
-; between zero and 22 rows with the slow modifier, 22 at base speed, and 44
-; at fast speed).  A fork is an optional land interval inside the river and
-; is handled by the same dirty-row pass.
+; between zero and 21 rows with the slow modifier, 21 at base speed, and 42
+; on the light two-pixel phases of adaptive fast mode). A fork is an optional
+; land interval inside the river and is handled by the same dirty-row pass.
 ;
 ; Bitmap convention: 1 = green land/object, 0 = blue water/object cut-out.
 ; Normal attributes stay fixed; only the bridge's brown cells are updated.
 ;
 ; Vertical screen contract:
-;   Y=0..7     immutable white-on-black HUD (LIVES, FUEL and SCORE)
-;   Y=8..183   scrolling playfield and all live actors
+;   Y=0..7     immutable black upper margin
+;   Y=8..15    white-on-black HUD (LIVES, FUEL and SCORE)
+;   Y=16..183  scrolling playfield and all live actors
 ;   Y=184..191 black lower margin, hidden from the renderer and bridge
 ; The separation is what lets the HUD update only when its contents change.
 ;
@@ -62,15 +63,20 @@ main_loop:
     cp 2
     jp z,game_over_frame
 
+    ; Profile the complete interactive frame, including input and AY work.
+    ; This matters when diagnosing load that appears specifically while Q is
+    ; held; the old marker started after both routines had already returned.
+    call profile_begin
     call read_keyboard
     call update_ay_sound
 
     ld a,(paused)
     or a
-    jr nz,main_loop
+    jr z,main_frame_active
+    call profile_end
+    jr main_loop
 
-    call profile_begin
-
+main_frame_active:
     ; XOR removes the old sprites exactly. The broad bridge stays resident;
     ; update_bridge later changes only the rows entering/leaving its envelope.
     call restore_entities
@@ -120,16 +126,22 @@ draw_updated_entities:
 ; ---------------------------------------------------------------------------
 
 init_attributes:
-    ; BRIGHT 1, PAPER blue, INK green in the 22-row playfield. Character row
-    ; zero is a white-on-black HUD and row 23 is a blank lower margin.
+    ; BRIGHT 1, PAPER blue, INK green in the 21-row playfield. Character row
+    ; zero is blank black, row one is the HUD and row 23 is the lower margin.
     ld hl,0x5800
     ld (hl),0x4c
     ld de,0x5801
     ld bc,767
     ldir
     ld hl,0x5800
-    ld (hl),0x47
+    xor a
+    ld (hl),a
     ld de,0x5801
+    ld bc,31
+    ldir
+    ld hl,0x5820
+    ld (hl),0x47
+    ld de,0x5821
     ld bc,31
     ldir
     ld hl,0x5ae0
@@ -200,7 +212,7 @@ update_hud_if_dirty:
     or a
     jr nz,update_existing_hud_digits
 
-    xor a
+    ld a,8
     ld (hud_clear_y),a
 clear_hud_row:
     ld a,(hud_clear_y)
@@ -215,13 +227,13 @@ clear_hud_row:
     ld a,(hud_clear_y)
     inc a
     ld (hud_clear_y),a
-    cp 8
+    cp 16
     jr nz,clear_hud_row
 
     call update_fuel_meter_text
     ld hl,hud_text
     ld b,32
-    ld d,0
+    ld d,8
     ld e,0
     call draw_rom_text
     ld a,1
@@ -236,7 +248,7 @@ update_existing_hud_digits:
     jr z,update_hud_score
     ld hl,hud_life_digit
     ld b,1
-    ld d,0
+    ld d,8
     ld e,6
     call draw_rom_text
 update_hud_score:
@@ -256,7 +268,7 @@ update_score_start_column:
     dec e
     dec a
     jr nz,update_score_start_column
-    ld d,0
+    ld d,8
     call draw_rom_text
     xor a
     ld (score_redraw_count),a
@@ -268,7 +280,7 @@ update_hud_fuel:
     call update_fuel_meter_text
     ld hl,fuel_meter_0
     ld b,6
-    ld d,0
+    ld d,8
     ld e,13
     jp draw_rom_text
 
@@ -365,17 +377,41 @@ paint_fuel_attributes:
     inc a                           ; favour the preceding letter after midpoint
 store_fuel_attr_repeat:
     ld (fuel_attr_repeat),a
+
+    ; F/U/E/L changes colour by character row, but all letters share one column.
+    ; Compute that column once and then walk the linear attribute map by +32.
+    ld a,(object_attr_row)
+    ld b,a
+    and 7
+    rrca
+    rrca
+    rrca
+    ld l,a
+    ld a,(object_attr_col)
+    add a,l
+    ld l,a
+    ld a,b
+    srl a
+    srl a
+    srl a
+    add a,0x58
+    ld h,a
+    ld de,32
 paint_next_fuel_attribute:
+    ld a,(object_attr_row)
+    cp 23
+    ret nc
     ld a,(fuel_attr_phase)
     or a
     ld a,0x4f                       ; BRIGHT white body over blue cut-outs
     jr z,fuel_attribute_value_ready
     ld a,0x4b                       ; BRIGHT magenta body over blue cut-outs
 fuel_attribute_value_ready:
-    ld (object_attr_value),a
-    ld a,1
-    ld (object_attr_rows),a
-    call paint_object_attribute_cells
+    ld (hl),a
+    add hl,de
+    ld a,(object_attr_row)
+    inc a
+    ld (object_attr_row),a
     ld a,(fuel_attr_rows_remaining)
     dec a
     ld (fuel_attr_rows_remaining),a
@@ -509,10 +545,19 @@ paint_object_attribute_cells:
     ld a,(object_attr_rows)
     or a
     ret z
-paint_object_attribute_row:
+clip_object_attribute_top:
     ld a,(object_attr_row)
-    or a
-    jr z,advance_object_attribute_row
+    cp 2
+    jr nc,prepare_object_attribute_address
+    inc a
+    ld (object_attr_row),a
+    ld a,(object_attr_rows)
+    dec a
+    ld (object_attr_rows),a
+    ret z
+    jr clip_object_attribute_top
+
+prepare_object_attribute_address:
     cp 23
     ret nc
     ld b,a
@@ -530,6 +575,17 @@ paint_object_attribute_row:
     srl a
     add a,0x58
     ld h,a
+
+    ; HL now points at the first cell. After each short horizontal run, add the
+    ; remaining part of the 32-byte attribute-row stride instead of rebuilding
+    ; the Spectrum attribute address from scratch for every row.
+    ld a,(object_attr_width)
+    ld e,a
+    ld a,32
+    sub e
+    ld e,a
+    ld d,0
+paint_object_attribute_row:
     ld a,(object_attr_width)
     ld b,a
     ld a,(object_attr_value)
@@ -537,15 +593,18 @@ paint_object_attribute_byte:
     ld (hl),a
     inc hl
     djnz paint_object_attribute_byte
-advance_object_attribute_row:
     ld a,(object_attr_row)
     inc a
     ld (object_attr_row),a
     ld a,(object_attr_rows)
     dec a
     ld (object_attr_rows),a
-    jr nz,paint_object_attribute_row
-    ret
+    ret z
+    ld a,(object_attr_row)
+    cp 23
+    ret nc
+    add hl,de
+    jr paint_object_attribute_row
 
 
 ; ---------------------------------------------------------------------------
@@ -948,8 +1007,8 @@ store_fork_step:
 
 full_redraw:
     ; Clear everything first, including stale sprites and text from a previous
-    ; life. The loop below deliberately reconstructs only playfield Y=8..183;
-    ; update_hud_if_dirty owns the top eight lines and row 23 stays black.
+    ; life. The loop below deliberately reconstructs only playfield Y=16..183;
+    ; update_hud_if_dirty owns Y=8..15; rows zero and 23 stay black.
     ld hl,0x4000
     xor a
     ld (hl),a
@@ -957,7 +1016,7 @@ full_redraw:
     ld bc,6143
     ldir
 
-    ld a,8                       ; first scanline below the HUD
+    ld a,16                      ; first scanline below the HUD
     ld (redraw_y),a
 full_redraw_row:
     ld a,(redraw_y)
@@ -973,7 +1032,7 @@ render_full_world_row:
     ; Input A=one playfield scanline. Unlike render_v3_row, this writes every
     ; byte of both banks and the complete island. It is intentionally reserved
     ; for startup and rows which a road/bridge operation cleared completely.
-    cp 8
+    cp 16
     ret c
     cp 184
     ret nc
@@ -1093,6 +1152,7 @@ render_dirty_rows:
     ld (dirty_residues),a
 dirty_residue_loop:
     ld a,(dirty_first_y)
+    add a,16                       ; skip the two protected top character rows
     ld (dirty_y),a
     call get_block_index_for_y
     ld a,l
@@ -1124,7 +1184,7 @@ render_v3_row:
     ; Bridge repair and the dirty pass share this entry, so enforce the HUD and
     ; lower-margin ownership here as a final safety net.
     ld a,(dirty_y)
-    cp 8
+    cp 16
     ret c
     cp 184
     ret nc
@@ -1138,7 +1198,7 @@ render_v3_row_indexed:
     ; index is maintained by the caller. Bridge repair still enters above and
     ; calculates the first index normally.
     ld a,(dirty_y)
-    cp 8
+    cp 16
     ret c
     cp 184
     ret nc
@@ -1518,7 +1578,7 @@ screen_table_page_ready:
 ; included so collision and steering may safely alter the background under it.
 
 init_entities:
-    ; All spawn Y values lie inside the 176-line playfield. River-bound actors
+    ; All spawn Y values lie inside the 168-line playfield. River-bound actors
     ; ask the current course sample for a safe X; the crossing aircraft is the
     ; exception because it intentionally flies over water and land.
     ld a,170
@@ -1526,7 +1586,7 @@ init_entities:
     call calc_safe_river_x
     ld (player_x),a
 
-    ld a,24
+    ld a,16
     ld (ship0_y),a
     call calc_safe_river_x_wide
     ld (ship0_x),a
@@ -1548,12 +1608,13 @@ init_entities:
     ld a,80
     ld (ship1_delay),a
 
-    ld a,56
+    ld a,16
     ld (enemy_plane_y),a
     xor a
     ld (enemy_plane_x),a
-    inc a
     ld (enemy_plane_active),a
+    ld a,48                         ; first crossing also enters from the top
+    ld (enemy_plane_delay),a
 
     ld a,126
     ld (helicopter_y),a
@@ -1571,7 +1632,7 @@ init_entities:
     ld a,140
     ld (helicopter_delay),a
 
-    ld a,8                           ; inactive depot will enter at the top
+    ld a,16                          ; inactive depot will enter below the HUD
     ld (fuel_y),a
     call calc_safe_river_x
     and 0xf8                         ; vertical FUEL occupies one bitmap byte
@@ -1587,7 +1648,7 @@ init_entities:
     ld a,32
     ld (fuel_consume_timer),a
 
-    ld a,8                           ; first shore tank enters with the scenery
+    ld a,16                          ; first shore tank enters with the scenery
     ld (tank_y),a
     xor a
     ld (tank_side),a
@@ -1623,6 +1684,7 @@ init_entities:
     ld (hit_explosion_active),a
     ld (explosion_sound_timer),a
     ld (slow_phase),a
+    ld (fast_phase),a
     ld (joystick_state),a
     ld a,1
     ld (requested_speed),a
@@ -1650,6 +1712,13 @@ xor_entities:
     jr xor_entities_bullet
 
 xor_entities_explosion:
+    call xor_crash_explosion
+    jr xor_entities_bullet
+
+xor_crash_explosion:
+    ; The crash scene is otherwise frozen. Keeping this primitive separate
+    ; lets crash_wait_frame replace only the 13-row animation every fifth
+    ; frame instead of erasing and redrawing every actor on all 75 frames.
     ld de,explosion_0_shift_table
     ld a,(explosion_frame)
     or a
@@ -1663,7 +1732,7 @@ xor_explosion_table_ready:
     ld c,a
     ld a,(player_y)
     ld b,13
-    call xor_sprite_shifted_2xn
+    jp xor_sprite_shifted_2xn
 
 xor_entities_bullet:
     ld a,(bullet_active)
@@ -2153,11 +2222,11 @@ bridge_fill_rows:
     ; Input A=start Y, B=row count, C=byte value. The bridge is maintained as
     ; a persistent bitmap band: only rows entering or leaving its 16-line
     ; envelope are touched during scrolling. The two clipping stages remove
-    ; HUD rows at the top and the black character row at the bottom.
-    cp 8
+    ; The upper margin/HUD at the top and black character row at the bottom.
+    cp 16
     jr nc,bridge_fill_top_clipped
     ld l,a
-    ld a,8
+    ld a,16
     sub l
     cp b
     ret nc
@@ -2165,7 +2234,7 @@ bridge_fill_rows:
     ld a,b
     sub e
     ld b,a
-    ld a,8
+    ld a,16
 bridge_fill_top_clipped:
     cp 184
     ret nc
@@ -2246,7 +2315,7 @@ bridge_refresh_residue:
 
 bridge_refresh_edge_row:
     ; Input A=one dirty bridge Y. HUD and lower margin remain immutable.
-    cp 8
+    cp 16
     ret c
     cp 184
     ret nc
@@ -2337,8 +2406,8 @@ bridge_paint_road_attribute_row:
     ; Input A=attribute row. Paint the left road, bridge and right road in one
     ; 32-byte pass. The previous full-white pass followed by a brown overwrite
     ; touched the wide river span twice and caused visible bridge-frame stalls.
-    or a
-    ret z
+    cp 2
+    ret c
     cp 23
     ret nc
     ld b,a
@@ -2389,9 +2458,9 @@ bridge_attr_right_byte:
     ret
 
 bridge_paint_full_attribute_row:
-    ; Input A=row (1..22), C=value. Paint all 32 cells in that character row.
-    or a
-    ret z
+    ; Input A=row (2..22), C=value. Paint all 32 cells in that character row.
+    cp 2
+    ret c
     cp 23
     ret nc
     ld b,a
@@ -2577,13 +2646,19 @@ try_spawn_ship0:
     ld (ship0_delay),a
     ret
 spawn_ship0:
+    ld a,16
+    call choose_clear_water_actor_y
+    cp 16
+    jr nz,defer_ship0_spawn
+    ld (ship0_y),a
     ld a,1
     ld (ship0_active),a
-    ld a,8
-    call choose_clear_water_actor_y
-    ld (ship0_y),a
     call calc_safe_river_x_wide
     ld (ship0_x),a
+    ret
+defer_ship0_spawn:
+    ld a,16
+    ld (ship0_delay),a
     ret
 
 advance_ship1:
@@ -2616,17 +2691,23 @@ try_spawn_ship1:
     ld (ship1_delay),a
     ret
 spawn_ship1:
+    ld a,16
+    call choose_clear_water_actor_y
+    cp 16
+    jr nz,defer_ship1_spawn
+    ld (ship1_y),a
     ld a,1
     ld (ship1_active),a
-    ld a,8
-    call choose_clear_water_actor_y
-    ld (ship1_y),a
     call calc_safe_river_x_wide
     ld (ship1_x),a
     ld a,1
     ld (ship1_dir),a
     ld a,2
     ld (ship1_timer),a
+    ret
+defer_ship1_spawn:
+    ld a,16
+    ld (ship1_delay),a
     ret
 store_ship1_y:
     ld (ship1_y),a
@@ -2684,15 +2765,18 @@ advance_enemy_plane:
     ; absent until the scene is initialized again.
     ld a,(enemy_plane_active)
     or a
-    ret z
+    jr z,wait_for_enemy_plane
     ld a,(speed_pixels)
     ld b,a
     ld a,(enemy_plane_y)
     add a,b
     cp 184
     jr c,store_enemy_plane_y
-    ld a,8
-    call choose_clear_water_actor_y
+    xor a
+    ld (enemy_plane_active),a
+    ld a,16
+    ld (enemy_plane_delay),a
+    ret
 store_enemy_plane_y:
     ld (enemy_plane_y),a
 
@@ -2703,6 +2787,36 @@ store_enemy_plane_y:
     xor a
 store_enemy_plane_x:
     ld (enemy_plane_x),a
+    ret
+
+wait_for_enemy_plane:
+    ; 255 means the one-per-life aircraft was shot down. Otherwise it waits
+    ; off-screen until the Y=16 entrance is genuinely clear.
+    ld a,(enemy_plane_delay)
+    cp 255
+    ret z
+    or a
+    jr z,try_spawn_enemy_plane
+    dec a
+    ld (enemy_plane_delay),a
+    ret
+try_spawn_enemy_plane:
+    call can_spawn_water_enemy
+    or a
+    jr z,defer_enemy_plane_spawn
+    ld a,16
+    call choose_clear_water_actor_y
+    cp 16
+    jr nz,defer_enemy_plane_spawn
+    ld (enemy_plane_y),a
+    xor a
+    ld (enemy_plane_x),a
+    inc a
+    ld (enemy_plane_active),a
+    ret
+defer_enemy_plane_spawn:
+    ld a,16
+    ld (enemy_plane_delay),a
     ret
 
 update_hit_explosion:
@@ -2747,9 +2861,9 @@ start_hit_explosion:
     ; then restart both the visual animation and the AY impact burst.
     ld (hit_explosion_x),a
     ld a,b
-    cp 10
+    cp 18
     jr nc,hit_explosion_has_top_room
-    ld a,8
+    ld a,16
     jr hit_explosion_y_ready
 hit_explosion_has_top_room:
     sub 2
@@ -2769,65 +2883,49 @@ hit_explosion_y_ready:
     jp start_ay_explosion
 
 choose_clear_water_actor_y:
-    ; Input A=preferred Y, output A=a free world line. Respawning everything
-    ; at Y=8 allowed two XOR silhouettes to occupy the same pixels and turn
-    ; into a composite "monster". Try vertically separated 16-pixel lanes.
-    ld (actor_spawn_y),a
-    ld a,10
-    ld (actor_spawn_attempts),a
-choose_actor_y_again:
-    ld a,(actor_spawn_y)
-    ld b,a
+    ; Runtime spawns are allowed only at the first playfield line. If it is too
+    ; close to another actor, return zero and let the caller retry later; never
+    ; search lower lanes, which used to make sprites pop into mid-screen.
+    ld b,16
     ld a,(ship0_active)
     or a
     jr z,check_ship1_spawn_y
     ld a,(ship0_y)
     call actor_y_too_close
-    jr c,try_next_actor_y
+    jr c,top_actor_y_is_busy
 check_ship1_spawn_y:
     ld a,(ship1_active)
     or a
     jr z,check_helicopter_spawn_y
     ld a,(ship1_y)
     call actor_y_too_close
-    jr c,try_next_actor_y
+    jr c,top_actor_y_is_busy
 check_helicopter_spawn_y:
     ld a,(helicopter_active)
     or a
     jr z,check_plane_spawn_y
     ld a,(helicopter_y)
     call actor_y_too_close
-    jr c,try_next_actor_y
+    jr c,top_actor_y_is_busy
 check_plane_spawn_y:
     ld a,(enemy_plane_active)
     or a
     jr z,check_fuel_spawn_y
     ld a,(enemy_plane_y)
     call actor_y_too_close
-    jr c,try_next_actor_y
+    jr c,top_actor_y_is_busy
 check_fuel_spawn_y:
     ld a,(fuel_active)
     or a
     jr z,actor_y_is_clear
     ld a,(fuel_y)
     call actor_y_overlaps_fuel
-    jr c,try_next_actor_y
+    jr c,top_actor_y_is_busy
 actor_y_is_clear:
-    ld a,b
+    ld a,16
     ret
-try_next_actor_y:
-    ld a,(actor_spawn_y)
-    add a,16
-    cp 168
-    jr c,store_next_actor_y
-    ld a,8
-store_next_actor_y:
-    ld (actor_spawn_y),a
-    ld a,(actor_spawn_attempts)
-    dec a
-    ld (actor_spawn_attempts),a
-    jr nz,choose_actor_y_again
-    ld a,(actor_spawn_y)            ; deterministic fallback in a crowded scene
+top_actor_y_is_busy:
+    xor a
     ret
 
 actor_y_too_close:
@@ -2875,59 +2973,41 @@ actor_clears_fuel:
     ret
 
 choose_clear_fuel_y:
-    ; Input A=preferred Y, output A=a free top line for the 32-pixel vertical
-    ; depot. A symmetric 32-line gap is deliberately conservative: with only
-    ; two active combat actors it prevents any part of F/U/E/L being XORed
-    ; together with a ship, helicopter, or crossing aircraft.
-    ld (actor_spawn_y),a
-    ld a,5
-    ld (actor_spawn_attempts),a
-choose_fuel_y_again:
-    ld a,(actor_spawn_y)
-    ld b,a
+    ; FUEL follows the same top-only rule. A symmetric 32-line gap is
+    ; deliberately conservative; a busy entrance makes the depot wait.
+    ld b,16
     ld a,(ship0_active)
     or a
     jr z,check_ship1_fuel_y
     ld a,(ship0_y)
     call fuel_y_too_close
-    jr c,try_next_fuel_y
+    jr c,top_fuel_y_is_busy
 check_ship1_fuel_y:
     ld a,(ship1_active)
     or a
     jr z,check_helicopter_fuel_y
     ld a,(ship1_y)
     call fuel_y_too_close
-    jr c,try_next_fuel_y
+    jr c,top_fuel_y_is_busy
 check_helicopter_fuel_y:
     ld a,(helicopter_active)
     or a
     jr z,check_plane_fuel_y
     ld a,(helicopter_y)
     call fuel_y_too_close
-    jr c,try_next_fuel_y
+    jr c,top_fuel_y_is_busy
 check_plane_fuel_y:
     ld a,(enemy_plane_active)
     or a
     jr z,fuel_y_is_clear
     ld a,(enemy_plane_y)
     call fuel_y_too_close
-    jr c,try_next_fuel_y
+    jr c,top_fuel_y_is_busy
 fuel_y_is_clear:
-    ld a,b
+    ld a,16
     ret
-try_next_fuel_y:
-    ld a,(actor_spawn_y)
-    add a,32
-    cp 153                          ; 152 is the last fully visible top line
-    jr c,store_next_fuel_y
-    ld a,8
-store_next_fuel_y:
-    ld (actor_spawn_y),a
-    ld a,(actor_spawn_attempts)
-    dec a
-    ld (actor_spawn_attempts),a
-    jr nz,choose_fuel_y_again
-    ld a,(actor_spawn_y)
+top_fuel_y_is_busy:
+    xor a
     ret
 
 fuel_y_too_close:
@@ -2944,39 +3024,6 @@ fuel_y_too_close:
 fuel_candidate_below:
     sub c
     cp 32
-    ret
-
-choose_actor_y_for_saved_height:
-    ; Input A=preferred Y. Bridge relocation stores the real object height in
-    ; actor_spawn_height; only vertical FUEL needs the wider spacing policy.
-    ld (actor_spawn_y),a
-    ld a,(actor_spawn_height)
-    cp 32
-    ld a,(actor_spawn_y)
-    jp z,choose_clear_fuel_y
-    jp choose_clear_water_actor_y
-
-choose_bridge_safe_actor_y:
-    ; Input A=preferred Y, B=height. First deconflict actors; if that choice
-    ; drifted into the bridge clearance band, retry immediately below it.
-    ld (actor_spawn_y),a
-    ld a,b
-    ld (actor_spawn_height),a
-    ld a,(actor_spawn_y)
-    call choose_actor_y_for_saved_height
-    ld (actor_spawn_y),a
-    ld a,(actor_spawn_height)
-    ld b,a
-    ld a,(actor_spawn_y)
-    call object_overlaps_bridge
-    or a
-    jr z,bridge_safe_actor_y_ready
-    ld a,(bridge_y)
-    add a,24
-    call choose_actor_y_for_saved_height
-    ld (actor_spawn_y),a
-bridge_safe_actor_y_ready:
-    ld a,(actor_spawn_y)
     ret
 
 advance_helicopter:
@@ -3011,11 +3058,13 @@ try_spawn_helicopter:
     ld (helicopter_delay),a
     ret
 spawn_helicopter:
+    ld a,16
+    call choose_clear_water_actor_y
+    cp 16
+    jr nz,defer_helicopter_spawn
+    ld (helicopter_y),a
     ld a,1
     ld (helicopter_active),a
-    ld a,8
-    call choose_clear_water_actor_y
-    ld (helicopter_y),a
     call calc_safe_river_x
     ld (helicopter_x),a
     ld a,(helicopter_move)
@@ -3024,6 +3073,10 @@ spawn_helicopter:
     ld a,1
     ld (helicopter_dir),a
     jr patrol_helicopter
+defer_helicopter_spawn:
+    ld a,16
+    ld (helicopter_delay),a
+    ret
 store_helicopter_y:
     ld (helicopter_y),a
 
@@ -3129,13 +3182,13 @@ update_fuel_waiting:
     ld (fuel_delay),a
     jp consume_fuel
 spawn_fuel:
-    ld a,8
+    ld a,16
     call choose_clear_fuel_y
-    cp 8
+    cp 16
     jr z,spawn_fuel_at_top
     ; A crowded entrance used to move the depot to an arbitrary on-screen Y.
     ; Wait instead, so FUEL always arrives from the top of the playfield.
-    ld a,8
+    ld a,16
     ld (fuel_delay),a
     jp consume_fuel
 spawn_fuel_at_top:
@@ -3227,7 +3280,7 @@ activate_waiting_bridge_tank:
     or a
     jr z,cancel_waiting_bridge_tank
     ld a,(bridge_y)
-    cp 5                            ; tank Y=bridge Y+3 must not enter the HUD
+    cp 13                           ; tank Y=bridge Y+3 must start at Y >= 16
     ret c
     ld a,(bridge_tank_mode)
     sub 2
@@ -3378,7 +3431,7 @@ update_shore_tank:
     jp maybe_fire_tank
 
 scroll_tank_down:
-    ; Return A=1 while the tank remains in the 176-line playfield, else zero.
+    ; Return A=1 while the tank remains in the 168-line playfield, else zero.
     ld a,(speed_pixels)
     ld b,a
     ld a,(tank_y)
@@ -3406,12 +3459,12 @@ spawn_tank:
     xor a
     ld a,1
     ld (tank_active),a
-    ld a,8
+    ld a,16
     ld (tank_y),a
     ld a,(tank_side)
     xor 1
     ld (tank_side),a
-    ld a,8
+    ld a,16
     call calc_tank_col
     ld (tank_col),a
     add a,a
@@ -3842,7 +3895,7 @@ destroyed_road_draw_loop:
 bridge_draw_destroyed_road_marking_row:
     ; Input A=Y. Draw alternating black gaps only over the two land approaches;
     ; the former bridge span stays untouched blue water.
-    cp 8
+    cp 16
     ret c
     cp 184
     ret nc
@@ -3907,7 +3960,7 @@ bridge_restore_road_row:
 bridge_erase_road_marking_row:
     ; Gap bytes are already 0xff. Only the sixteen former black dash bytes
     ; need restoring, halving writes on the bridge's hot scrolling path.
-    cp 8
+    cp 16
     ret c
     cp 184
     ret nc
@@ -3946,7 +3999,7 @@ bridge_draw_entering_road_row:
 bridge_fill_full_bitmap_row:
     ; Input A=Y, C=byte. Road rows are inside a bridge band, so land plus
     ; bridge makes the complete 256-pixel scanline solid before dash cutting.
-    cp 8
+    cp 16
     ret c
     cp 184
     ret nc
@@ -3976,7 +4029,7 @@ bridge_full_bitmap_byte:
 bridge_draw_road_marking_row:
     ; Input A=Y. The intact bridge/road row is already solid 0xff, so write
     ; only the sixteen black dash bytes instead of redundantly storing all 32.
-    cp 8
+    cp 16
     ret c
     cp 184
     ret nc
@@ -4004,8 +4057,8 @@ update_existing_bullet:
     or a
     ret z
     ld a,(bullet_y)
-    ; The projectile may reach Y=8, but never enters the HUD at Y=0..7.
-    cp 14
+    ; The projectile may reach Y=16, but never enters the HUD at Y=8..15.
+    cp 22
     jr nc,move_bullet_up
     xor a
     ld (bullet_active),a
@@ -4359,6 +4412,8 @@ bullet_hits_enemy_plane:
     xor a
     ld (bullet_active),a
     ld (enemy_plane_active),a       ; one crossing aircraft per scene/life
+    dec a
+    ld (enemy_plane_delay),a        ; 255 prevents an in-life respawn
     call add_score_100
     ld a,1
     ret
@@ -4580,68 +4635,33 @@ check_fuel_bridge:
     ret
 
 relocate_ship0:
-    ld a,(bridge_y)
-    cp 24
-    jr c,ship0_below_bridge
-    ld a,8
-    jr store_relocated_ship0_y
-ship0_below_bridge:
-    add a,24
-store_relocated_ship0_y:
-    ld b,8
-    call choose_bridge_safe_actor_y
-    ld (ship0_y),a
-    call calc_safe_river_x_wide
-    ld (ship0_x),a
+    ; Never teleport an actor to a free lane in the middle of the screen. A
+    ; bridge conflict removes it cleanly and the ordinary top-entry path retries.
+    xor a
+    ld (ship0_active),a
+    ld a,16
+    ld (ship0_delay),a
     ret
 
 relocate_ship1:
-    ld a,(bridge_y)
-    cp 24
-    jr c,ship1_below_bridge
-    ld a,8
-    jr store_relocated_ship1_y
-ship1_below_bridge:
-    add a,24
-store_relocated_ship1_y:
-    ld b,8
-    call choose_bridge_safe_actor_y
-    ld (ship1_y),a
-    call calc_safe_river_x_wide
-    ld (ship1_x),a
+    xor a
+    ld (ship1_active),a
+    ld a,16
+    ld (ship1_delay),a
     ret
 
 relocate_helicopter:
-    ld a,(bridge_y)
-    cp 26
-    jr c,helicopter_below_bridge
-    ld a,8
-    jr store_relocated_helicopter_y
-helicopter_below_bridge:
-    add a,24
-store_relocated_helicopter_y:
-    ld b,10
-    call choose_bridge_safe_actor_y
-    ld (helicopter_y),a
-    call calc_safe_river_x
-    ld (helicopter_x),a
+    xor a
+    ld (helicopter_active),a
+    ld a,16
+    ld (helicopter_delay),a
     ret
 
 relocate_fuel:
-    ld a,(bridge_y)
-    cp 48                           ; 8px top + 32px depot + 8px clearance
-    jr c,fuel_below_bridge
-    ld a,8
-    jr store_relocated_fuel_y
-fuel_below_bridge:
-    add a,24
-store_relocated_fuel_y:
-    ld b,32
-    call choose_bridge_safe_actor_y
-    ld (fuel_y),a
-    call calc_safe_river_x
-    and 0xf8
-    ld (fuel_x),a
+    xor a
+    ld (fuel_active),a
+    ld a,16
+    ld (fuel_delay),a
     ret
 
 check_player_collision:
@@ -4862,13 +4882,11 @@ begin_crash:
 
 crash_wait_frame:
     ; Freeze the river and all enemies for 75 display frames (1.5 seconds).
-    ; Only the three-frame explosion and its short AY burst keep advancing.
+    ; Frozen actors remain resident in VRAM. Only replace the explosion on its
+    ; five-frame animation boundary; the short AY burst still advances every
+    ; frame independently of bitmap work.
     call update_ay_explosion
     call profile_begin
-    call restore_entities
-    call restore_helicopter_attributes
-    call restore_fuel_attributes
-    call restore_tank_attributes
 
     ld a,(explosion_timer)
     dec a
@@ -4879,6 +4897,9 @@ crash_wait_frame:
     dec a
     ld (explosion_anim_timer),a
     jr nz,draw_crash_wait_frame
+
+    ; Remove the old phase with the same XOR primitive that drew it.
+    call xor_crash_explosion
     ld a,5
     ld (explosion_anim_timer),a
     ld a,(explosion_frame)
@@ -4888,13 +4909,9 @@ crash_wait_frame:
     xor a
 store_explosion_frame:
     ld (explosion_frame),a
+    call xor_crash_explosion
 
 draw_crash_wait_frame:
-    call paint_helicopter_attributes
-    call paint_fuel_attributes
-    call paint_tank_attributes
-    call paint_crash_attributes
-    call draw_entities
     call profile_end
     jp main_loop
 
@@ -5274,12 +5291,13 @@ read_keyboard:
     xor a
     ld (player_move),a
 
-    ; Base speed is 1 px/frame. Q requests 2 px only while held; A requests
+    ; Base speed is 1 px/frame. Q requests adaptive fast scrolling; A requests
     ; 0.5 px by alternating zero- and one-pixel scroll frames.
     ld a,1
     ld (requested_speed),a
     ld bc,0xfbfe
     in a,(c)
+    ld e,a                           ; preserve the shared Q/T/Y/U/I/O/R row
     bit 0,a
     jr nz,read_slow_key
     ld a,2
@@ -5324,11 +5342,62 @@ resolve_requested_speed:
     ld a,(requested_speed)
     or a
     jr z,resolve_slow_speed
+    cp 2
+    jr z,resolve_fast_speed
+
+    ; Normal speed also resets both fractional cadence generators.
+    ld (speed_pixels),a
+    xor a
+    ld (slow_phase),a
+    ld (fast_phase),a
+    jr read_steering
+
+resolve_fast_speed:
+    ; Two-pixel scrolling doubles the bank pass from 21 to 42 scanlines. Never
+    ; combine that peak with a tank, bridge/road repair or either projectile.
+    ; In a light scene alternate 1/2 pixels for a 1.5 px average; a heavy scene
+    ; is capped at one pixel so every frame retains enough 50 Hz headroom.
+    ld a,(bridge_active)
+    or a
+    jr nz,resolve_heavy_fast_speed
+    ld a,(destroyed_road_active)
+    or a
+    jr nz,resolve_heavy_fast_speed
+    ld a,(tank_active)
+    or a
+    jr nz,resolve_heavy_fast_speed
+    ld a,(bridge_tank_active)
+    or a
+    jr nz,resolve_heavy_fast_speed
+    ld a,(bullet_active)
+    or a
+    jr nz,resolve_heavy_fast_speed
+    ld a,(tank_shell_active)
+    or a
+    jr nz,resolve_heavy_fast_speed
+
+    ld a,(fast_phase)
+    ld b,a
+    xor 1
+    ld (fast_phase),a
+    ld a,b
+    inc a                           ; phase 0/1 resolves to 1/2 pixels
     ld (speed_pixels),a
     xor a
     ld (slow_phase),a
     jr read_steering
+
+resolve_heavy_fast_speed:
+    ld a,1
+    ld (speed_pixels),a
+    xor a
+    ld (slow_phase),a
+    ld (fast_phase),a
+    jr read_steering
+
 resolve_slow_speed:
+    xor a
+    ld (fast_phase),a
     ld a,(slow_phase)
     ld (speed_pixels),a
     xor 1
@@ -5397,8 +5466,7 @@ fire_released:
     ld (fire_down),a
 
 read_reset_key:
-    ld bc,0xfbfe
-    in a,(c)
+    ld a,e
     bit 3,a
     jr nz,reset_released
     ld a,(r_down)
@@ -5733,7 +5801,7 @@ bullet_background_rows: db 0
 bullet_background_col: db 0
 bullet_background_mask_0: db 0
 bullet_background_mask_1: db 0
-ship0_y: db 24
+ship0_y: db 16
 ship0_x: db 96                   ; top-left of a 32-pixel hull
 ship0_active: db 1
 ship0_delay: db 0
@@ -5743,9 +5811,10 @@ ship1_active: db 0
 ship1_delay: db 80
 ship1_dir: db 1
 ship1_timer: db 2
-enemy_plane_y: db 56
+enemy_plane_y: db 16
 enemy_plane_x: db 0
-enemy_plane_active: db 1          ; cleared permanently after a successful hit
+enemy_plane_active: db 0          ; first crossing waits for a clear top entry
+enemy_plane_delay: db 48          ; 255=shot down; otherwise top-entry retry
 helicopter_y: db 126
 helicopter_x: db 120
 helicopter_active: db 0
@@ -5769,7 +5838,7 @@ tank_side: db 0
 tank_active: db 1
 tank_delay: db 0
 tank_fire_timer: db 72           ; initial bank-tank delay; later shots use 96
-bridge_tank_y: db 8
+bridge_tank_y: db 16
 bridge_tank_x: db 0
 bridge_tank_side: db 0            ; 0 enters from left, 1 enters from right
 bridge_tank_active: db 0
@@ -5816,6 +5885,7 @@ precompute_rows: db 0
 precompute_shift: db 0
 requested_speed: db 1            ; raw Q/A/Kempston request before 0.5x phase
 slow_phase: db 0                 ; alternates 0/1 scroll for average 0.5 px
+fast_phase: db 0                 ; alternates 1/2 scroll for average 1.5 px
 joystick_state: db 0             ; sanitized Kempston bits 0..4
 ay_last_speed: db 255             ; avoids rewriting unchanged engine registers
 shot_sound_timer: db 0            ; 17..0 software amplitude/frequency envelope
@@ -5840,16 +5910,12 @@ explosion_anim_timer: db 0
 explosion_frame: db 0
 hit_explosion_active: db 0        ; short impact animation for shot actors
 hit_explosion_x: db 0
-hit_explosion_y: db 8
+hit_explosion_y: db 16
 hit_explosion_timer: db 0
 hit_explosion_anim_timer: db 0
 hit_explosion_frame: db 0
-actor_spawn_y: db 8               ; candidate used by vertical deconfliction
-actor_spawn_attempts: db 0
-actor_spawn_height: db 8
-
 ; Shared rectangle painter scratch for white helicopter and yellow explosion
-; attributes. Rows 0 and 23 are rejected by the painter.
+; attributes. Rows 0, 1 and 23 are rejected by the painter.
 object_attr_value: db 0
 object_attr_width: db 0
 object_attr_col: db 0

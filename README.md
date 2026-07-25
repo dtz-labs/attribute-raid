@@ -5,7 +5,7 @@ renderer and optional AY-3-8912 sound for the Spectrum 128K or a 48K machine
 with an AY interface. All code executed on the Spectrum is well-commented Z80
 assembly; there is no C runtime.
 
-**Status:** `0.1.2` is a beta release. The core gameplay is playable, but level
+**Status:** `0.1.3` is a beta release. The core gameplay is playable, but level
 progression and final balancing are not complete yet.
 
 V3 deliberately follows the coarse geometry of the Atari 2600 game. The banks
@@ -48,7 +48,9 @@ BASIC loader and TAP file, so no external Z80 toolchain is required.
 
 - `O` / `P` — move the player aircraft left / right at 2 px per frame,
 - no speed key — base scrolling speed of 1 px per frame,
-- hold `Q` — temporarily increase scrolling to 2 px per frame,
+- hold `Q` — adaptive fast scrolling: 1/2 px alternating (1.5 px average) in
+  light scenes, capped at 1 px while a tank, bridge, road, or projectile is
+  active,
 - hold `A` — temporarily reduce scrolling to an average of 0.5 px per frame,
 - `SPACE` — fire,
 - `R` — start a new game with two lives, a zero score, and a new course.
@@ -83,12 +85,13 @@ second renderer or screen buffer. The bridge remains a separate object. It
 matches the current river width and is 16 scanlines high. A white road with a
 two-scanline dashed centre marking extends across the land on both sides.
 
-The top character row is a static HUD, the bottom character row remains black,
-and the river occupies 176 scanlines (`Y=8..183`). Each scroll sample changes
-only one eighth of the playfield scanlines, so the renderer updates:
+The first character row is a blank black margin, the second is the static HUD,
+and the bottom character row also remains black. The river occupies 168
+scanlines (`Y=16..183`). Each scroll sample changes only one eighth of the
+playfield scanlines, so the renderer updates:
 
-- 22 scanlines at 1 px per frame,
-- 44 scanlines at 2 px per frame.
+- 21 scanlines at 1 px per frame,
+- 42 scanlines at 2 px per frame.
 
 On every affected scanline it writes three bytes around the left bank, three
 around the right bank, and—only during a fork—a short island interval. The full
@@ -174,13 +177,12 @@ the bounds of their current branch; during a fork, the island acts as a second
 bank and forces them to turn around. While drawing a few sprite rows, `SP`
 temporarily points at the scanline-address table, and consecutive `POP HL`
 instructions avoid recalculating the Spectrum's interlaced bitmap addresses.
-Respawning water objects select distinct vertical lanes at least twelve pixels
-apart. Bridge-driven relocation uses the same check, preventing two ships or a
-ship and helicopter from being XORed into a composite silhouette. FUEL uses
-its complete 32-pixel height in both directions of this test: it avoids active
-ships and aircraft when it appears, and later respawns avoid the whole depot.
-If the entrance is occupied, the depot waits and retries instead of suddenly
-materialising farther down the river.
+Recurring ships, the crossing aircraft, helicopters, FUEL, and shore tanks may
+enter only at the first playfield scanline (`Y=16`). The entrance check uses a
+twelve-pixel gap for combat sprites and the full 32-pixel depot height for
+FUEL. If that entrance is occupied, the actor waits off-screen and retries
+later. A bridge conflict likewise removes a water actor and queues a fresh top
+entry instead of teleporting it into a free lane halfway down the screen.
 
 The bridge is not erased in full while scrolling. Each frame restores only the
 1–2 scanlines leaving its top, adds new scanlines at the bottom, and refreshes
@@ -206,12 +208,13 @@ splash itself is harmless. The shore tank waits 72 frames before its first shot
 and 96 frames between later shots, making its fire less frequent but more
 dangerous once a shell is in flight.
 
-The 32-column HUD displays `LIVES:n FUEL:###### SCORE:nnnnnn`. The six fuel
-cells represent eight units each. One unit is consumed every 32 frames; while
-the player overlaps `FUEL`, consumption pauses and one unit is restored every
-five frames. Reaching zero causes a crash. Labels are copied only when the
-screen is created. Later updates touch only the changed life digit, fuel cells,
-or the shortest score suffix affected by decimal carry.
+The 32-column HUD displays `LIVES:n FUEL:###### SCORE:nnnnnn` on the second
+character row, below the blank upper margin. The six fuel cells represent eight
+units each. One unit is consumed every 32 frames; while the player overlaps
+`FUEL`, consumption pauses and one unit is restored every five frames. Reaching
+zero causes a crash. Labels are copied only when the screen is created. Later
+updates touch only the changed life digit, fuel cells, or the shortest score
+suffix affected by decimal carry.
 
 `FUEL` is deliberately non-lethal: the player may overlap it to refuel. A
 projectile destroys it, awards 100 points, and starts the normal impact
@@ -245,7 +248,8 @@ The player starts with two lives. After a collision, a three-frame explosion
 replaces the aircraft while the river and all other objects remain frozen for
 75 frames, or approximately 1.5 seconds at 50 Hz. After the first crash the
 course restarts with one life and the score preserved. The second crash opens a
-separate `GAME OVER` screen.
+separate `GAME OVER` screen. Frozen sprites remain resident during the pause;
+only the old and new 13-row explosion phases are XORed every fifth frame.
 
 The player projectile can destroy a bridge, now with both a visible impact and
 an AY explosion. A bridge alone is worth 200 points. If a crossing tank is
@@ -313,6 +317,16 @@ does the same for two lines. Restoration writes only the 16 bytes that actually
 contained black dashes. The left road, bridge span, and right road attributes
 are written in one 32-byte pass rather than painting the full row white and
 then overwriting the wide centre.
+
+The interactive fast mode no longer combines a two-pixel bank pass with a tank,
+bridge/road repair, or either projectile. Light frames alternate one and two
+pixels; heavy frames are capped at one, avoiding the former worst-case stack-up
+while retaining a faster average course speed when headroom is available.
+The profiling border covers input and AY updates as well as rendering, so a
+Q-specific timing regression is visible in the measured frame budget.
+Moving-object attributes now calculate their first cell once and advance by the
+linear 32-byte attribute-row stride. `FUEL` uses one pass for all of its
+alternating colour bands instead of restarting the generic painter per row.
 
 The precise current worst case still needs to be remeasured in the debugger,
 so the values above must not be treated as timings for the current build. A
