@@ -120,12 +120,112 @@ def mem_expr(op: str) -> str | None:
 class Assembler:
     def __init__(self, source: Path, defines: dict[str, int] | None = None) -> None:
         self.source = source
-        self.lines = source.read_text(encoding="utf-8").splitlines()
         self.defines = defines or {}
+        self.lines = self._preprocess(source.resolve(), [])
         self.labels: dict[str, int] = {}
         self.origin: int | None = None
         self.pc = 0
         self.pass_no = 1
+
+    def _preprocess(self, source: Path, include_stack: list[Path]) -> list[str]:
+        """Expand includes and compile-time conditionals before both passes.
+
+        Supported directives intentionally mirror the small subset this project
+        needs: #if, #ifdef, #ifndef, #else, #endif and #include "file".  The
+        leading # is optional for compatibility with traditional assemblers.
+        """
+        if source in include_stack:
+            chain = " -> ".join(str(path) for path in [*include_stack, source])
+            raise AsmError(f"recursive include: {chain}")
+        try:
+            raw_lines = source.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise AsmError(f"cannot read include {source}: {exc}") from exc
+
+        output: list[str] = []
+        # Each entry is (parent active, condition value, else already seen).
+        conditions: list[tuple[bool, bool, bool]] = []
+        active = True
+        directive_re = re.compile(
+            r"^\s*#?\s*(if|ifdef|ifndef|else|endif|include)\b(.*)$",
+            re.IGNORECASE,
+        )
+
+        for lineno, raw in enumerate(raw_lines, 1):
+            match = directive_re.match(raw)
+            if not match:
+                if active:
+                    output.append(raw)
+                else:
+                    output.append("")
+                continue
+
+            directive = match.group(1).lower()
+            argument = match.group(2).strip()
+            if directive in {"if", "ifdef", "ifndef"}:
+                if directive == "if":
+                    try:
+                        value = eval(
+                            argument,
+                            {"__builtins__": {}},
+                            dict(self.defines),
+                        )
+                    except Exception as exc:
+                        raise AsmError(
+                            f"{source}:{lineno}: bad #if expression {argument!r}"
+                        ) from exc
+                    condition = bool(int(value))
+                else:
+                    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", argument):
+                        raise AsmError(
+                            f"{source}:{lineno}: bad #{directive} symbol {argument!r}"
+                        )
+                    condition = argument in self.defines
+                    if directive == "ifndef":
+                        condition = not condition
+                conditions.append((active, condition, False))
+                active = active and condition
+                output.append("")
+                continue
+
+            if directive == "else":
+                if argument:
+                    raise AsmError(f"{source}:{lineno}: unexpected text after #else")
+                if not conditions:
+                    raise AsmError(f"{source}:{lineno}: #else without #if")
+                parent_active, condition, else_seen = conditions[-1]
+                if else_seen:
+                    raise AsmError(f"{source}:{lineno}: duplicate #else")
+                conditions[-1] = (parent_active, condition, True)
+                active = parent_active and not condition
+                output.append("")
+                continue
+
+            if directive == "endif":
+                if argument:
+                    raise AsmError(f"{source}:{lineno}: unexpected text after #endif")
+                if not conditions:
+                    raise AsmError(f"{source}:{lineno}: #endif without #if")
+                parent_active, _, _ = conditions.pop()
+                active = parent_active
+                output.append("")
+                continue
+
+            # #include is ignored inside an inactive branch, just like C.
+            if not active:
+                output.append("")
+                continue
+            include_match = re.fullmatch(r'"([^"\n]+)"', argument)
+            if not include_match:
+                raise AsmError(
+                    f"{source}:{lineno}: #include expects a quoted relative path"
+                )
+            include_path = (source.parent / include_match.group(1)).resolve()
+            output.extend(self._preprocess(include_path, [*include_stack, source]))
+
+        if conditions:
+            raise AsmError(f"{source}: unterminated conditional block")
+        return output
 
     def assemble(self) -> tuple[int, bytes, dict[str, int]]:
         self.pass_no = 1

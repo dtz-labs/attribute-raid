@@ -172,9 +172,10 @@ reconstructed from the interlaced object data of the Atari 2600 River Raid and
 expanded horizontally by 2×. The public
 [River Raid disassembly](https://gitlab.com/menelkir/atari-2600/-/blob/master/River%20Raid%20%28decomp%29.asm)
 was used as a reference. The tank is a new silhouette drawn under the same
-eight-bit-source and 2× horizontal expansion constraints. Steering selects a
-dedicated left- or right-banked player silhouette; releasing the direction
-returns to the level-wing sprite without leaving XOR trails.
+eight-bit-source and 2× horizontal expansion constraints. Steering selects
+the original Atari `JetMove` silhouette, reflected exactly for the opposite
+direction as the 2600 did with `REFP0`; releasing the direction returns to the
+level-wing sprite without leaving XOR trails.
 
 The helicopter now uses the actual `Heli0A/B` and `Heli1A/B` data from the
 Atari disassembly. Interleaving the A/B kernel rows produces the ten visible
@@ -225,11 +226,14 @@ On Timex, ships, helicopters, balloons and FUEL are guaranteed to remain over
 zero bitmap bytes (water), while the shore tank remains over full land bytes.
 Their redraw therefore overwrites complete source rows, storing transparent
 zeroes as well as opaque ones instead of performing an additive draw. Those
-actors remain visible during the expensive dirty-bank pass and are removed
-only after most movement logic has finished, immediately before bridge writes
-and bitmap collision need a clean background. The player, crossing aircraft,
-projectiles, explosions and bridge tank retain the masked path because an
-opaque rectangle could otherwise cut a bank edge or a road marking.
+actors remain visible during the expensive dirty-bank pass. On ordinary Timex
+frames, a scrolling ship is advanced in place: only the one or two departing
+top rows and an exposed side byte are restored before the complete new shape
+is written. It is never blanked as a whole between frames. Bridges remain
+incremental too; only their departing/entering rows and moving edge details are
+updated. The player, crossing aircraft, projectiles, explosions and bridge tank
+retain the masked path because an opaque rectangle could otherwise cut a bank
+edge or a road marking.
 
 The blitters support arbitrary bit offsets, so 1–3 px movement is not
 implemented as a series of eight-pixel jumps. Eight shifted variants of each
@@ -255,7 +259,7 @@ does not require two complete passes over the rectangle.
 ## Collision and gameplay details
 
 Bank collision no longer relies on rectangular branch bounds. Every opaque
-pixel of the 16×13 player mask is compared with the actual bitmap. A set bit
+pixel of the 16×14 player mask is compared with the actual bitmap. A set bit
 means bank, island, or intact bridge. Transparent sprite corners cannot cause
 an early crash, and both sides of an island behave identically.
 
