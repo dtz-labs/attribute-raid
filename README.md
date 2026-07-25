@@ -5,7 +5,7 @@ renderer and optional AY-3-8912 sound for the Spectrum 128K or a 48K machine
 with an AY interface. All code executed on the Spectrum is well-commented Z80
 assembly; there is no C runtime.
 
-**Status:** `0.1.0` is a beta release. The core gameplay is playable, but level
+**Status:** `0.1.2` is a beta release. The core gameplay is playable, but level
 progression and final balancing are not complete yet.
 
 V3 deliberately follows the coarse geometry of the Atari 2600 game. The banks
@@ -65,7 +65,11 @@ One course block represents eight world scanlines. Both bank positions use
 four-pixel units, producing the large characteristic steps. The generator
 keeps the same bank movement for 5–12 blocks, or 40–96 scanlines. Long straight
 and constant-slope sections are therefore more common than small random
-zigzags. Such a section could later be compressed into a `length + step` pair.
+zigzags. A run may move both banks together, narrow or widen the river, or hold
+one bank while the other turns. The width varies from brief 120-pixel narrows
+to 168-pixel open water, and either edge moves by at most one bitmap byte
+between adjacent blocks. Such a section could later be compressed into a
+`length + step` pair.
 
 Thirty-two blocks form a ring. Six page-aligned arrays store:
 

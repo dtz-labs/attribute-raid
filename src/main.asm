@@ -753,9 +753,11 @@ center_q_ready:
     ld b,a
     ld a,(half_step)
     add a,b
-    cp 17
+    cp 15
     jr nc,half_q_not_low
-    ld a,17
+    ; Brief 120-pixel narrows remain wide enough for a 32-pixel ship in either
+    ; branch of the largest fork. Reverse immediately at the lower bound.
+    ld a,15
     ld (gen_half_q),a
     ld a,1
     ld (half_step),a
@@ -5434,11 +5436,15 @@ profile_end:
 
 block_motion_table:
     ; centre step, half-width step in four-pixel units per eight-line block.
-    ; Six stationary entries, four slopes each way, and two rare width runs.
-    db 0,0, 0,0, 0,0, 0,0, 0,0, 0,0
-    db 1,0, 1,0, 1,0, 1,0
-    db 255,0, 255,0, 255,0, 255,0
-    db 0,1, 0,255
+    ; Besides whole-river slopes, half-width changes make the banks converge or
+    ; diverge. Combined centre/width steps anchor one bank while the other one
+    ; turns, breaking the former near-symmetry without exceeding one byte of
+    ; edge movement between adjacent blocks. Modes are interleaved so the
+    ; deterministic initial LFSR sequence also contains asymmetric sections.
+    db 0,0, 1,1, 1,255, 0,1
+    db 1,0, 255,0, 0,255, 255,1
+    db 0,0, 1,0, 255,0, 0,1
+    db 0,255, 1,0, 255,0, 255,255
 
 ay_engine_noise_periods:
     ; Slow, normal, fast. AY noise frequency rises as the period falls.
