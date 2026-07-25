@@ -121,18 +121,32 @@ class Assembler:
     def __init__(self, source: Path, defines: dict[str, int] | None = None) -> None:
         self.source = source
         self.defines = defines or {}
+        self.constants: dict[str, int] = {}
+        # name -> (parameter names, raw body, definition source, line)
+        self.macros: dict[str, tuple[list[str], list[str], Path, int]] = {}
+        self.macro_expansion_id = 0
         self.lines = self._preprocess(source.resolve(), [])
         self.labels: dict[str, int] = {}
         self.origin: int | None = None
         self.pc = 0
         self.pass_no = 1
 
-    def _preprocess(self, source: Path, include_stack: list[Path]) -> list[str]:
+    def _preprocess(
+        self, source: Path, include_stack: list[Path]
+    ) -> list[tuple[Path, int, str]]:
         """Expand includes and compile-time conditionals before both passes.
 
         Supported directives intentionally mirror the small subset this project
-        needs: #if, #ifdef, #ifndef, #else, #endif and #include "file".  The
-        leading # is optional for compatibility with traditional assemblers.
+        needs: #if, #ifdef, #ifndef, #else, #endif, #include "file" and small
+        parameter macros. The leading # is optional for compatibility with
+        traditional assemblers. A macro is declared with
+
+            #macro NAME parameter,other
+              ... {parameter} ...
+            #endmacro
+
+        and invoked as ``@NAME value,other``. Labels beginning with ``%%`` in
+        its body are made unique for every expansion.
         """
         if source in include_stack:
             chain = " -> ".join(str(path) for path in [*include_stack, source])
@@ -142,26 +156,79 @@ class Assembler:
         except OSError as exc:
             raise AsmError(f"cannot read include {source}: {exc}") from exc
 
-        output: list[str] = []
+        # Preserve the physical source location through nested includes. This
+        # keeps diagnostics useful after main.asm is split into small modules.
+        output: list[tuple[Path, int, str]] = []
         # Each entry is (parent active, condition value, else already seen).
         conditions: list[tuple[bool, bool, bool]] = []
         active = True
         directive_re = re.compile(
-            r"^\s*#?\s*(if|ifdef|ifndef|else|endif|include)\b(.*)$",
+            r"^\s*#?\s*(if|ifdef|ifndef|else|endif|include|macro|endmacro)\b(.*)$",
             re.IGNORECASE,
         )
+        macro_capture: tuple[str, list[str], list[str], int, bool] | None = None
 
         for lineno, raw in enumerate(raw_lines, 1):
             match = directive_re.match(raw)
+
+            if macro_capture is not None:
+                name, parameters, body, definition_line, define_macro = macro_capture
+                if match and match.group(1).lower() == "endmacro":
+                    if match.group(2).strip():
+                        raise AsmError(
+                            f"{source}:{lineno}: unexpected text after #endmacro"
+                        )
+                    if define_macro:
+                        if name in self.macros:
+                            raise AsmError(
+                                f"{source}:{definition_line}: duplicate macro {name}"
+                            )
+                        self.macros[name] = (
+                            parameters,
+                            body,
+                            source,
+                            definition_line,
+                        )
+                    macro_capture = None
+                else:
+                    body.append(raw)
+                output.append((source, lineno, ""))
+                continue
+
             if not match:
                 if active:
-                    output.append(raw)
+                    output.extend(self._expand_macro_line(source, lineno, raw, []))
                 else:
-                    output.append("")
+                    output.append((source, lineno, ""))
                 continue
 
             directive = match.group(1).lower()
             argument = match.group(2).strip()
+            if directive == "macro":
+                macro_match = re.fullmatch(
+                    r"([A-Za-z_][A-Za-z0-9_]*)(?:\s+(.*))?", argument
+                )
+                if not macro_match:
+                    raise AsmError(f"{source}:{lineno}: bad #macro declaration")
+                name = macro_match.group(1)
+                parameter_text = macro_match.group(2) or ""
+                parameters = split_operands(parameter_text) if parameter_text else []
+                if any(
+                    not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", parameter)
+                    for parameter in parameters
+                ):
+                    raise AsmError(
+                        f"{source}:{lineno}: bad macro parameter list {parameter_text!r}"
+                    )
+                if len(parameters) != len(set(parameters)):
+                    raise AsmError(f"{source}:{lineno}: duplicate macro parameter")
+                macro_capture = (name, parameters, [], lineno, active)
+                output.append((source, lineno, ""))
+                continue
+
+            if directive == "endmacro":
+                raise AsmError(f"{source}:{lineno}: #endmacro without #macro")
+
             if directive in {"if", "ifdef", "ifndef"}:
                 if directive == "if":
                     try:
@@ -185,7 +252,7 @@ class Assembler:
                         condition = not condition
                 conditions.append((active, condition, False))
                 active = active and condition
-                output.append("")
+                output.append((source, lineno, ""))
                 continue
 
             if directive == "else":
@@ -198,7 +265,7 @@ class Assembler:
                     raise AsmError(f"{source}:{lineno}: duplicate #else")
                 conditions[-1] = (parent_active, condition, True)
                 active = parent_active and not condition
-                output.append("")
+                output.append((source, lineno, ""))
                 continue
 
             if directive == "endif":
@@ -208,12 +275,12 @@ class Assembler:
                     raise AsmError(f"{source}:{lineno}: #endif without #if")
                 parent_active, _, _ = conditions.pop()
                 active = parent_active
-                output.append("")
+                output.append((source, lineno, ""))
                 continue
 
             # #include is ignored inside an inactive branch, just like C.
             if not active:
-                output.append("")
+                output.append((source, lineno, ""))
                 continue
             include_match = re.fullmatch(r'"([^"\n]+)"', argument)
             if not include_match:
@@ -225,7 +292,54 @@ class Assembler:
 
         if conditions:
             raise AsmError(f"{source}: unterminated conditional block")
+        if macro_capture is not None:
+            name, _, _, definition_line, _ = macro_capture
+            raise AsmError(
+                f"{source}:{definition_line}: unterminated macro {name}"
+            )
         return output
+
+    def _expand_macro_line(
+        self, source: Path, lineno: int, raw: str, expansion_stack: list[str]
+    ) -> list[tuple[Path, int, str]]:
+        match = re.match(r"^\s*@([A-Za-z_][A-Za-z0-9_]*)(?:\s+(.*))?\s*$", raw)
+        if not match:
+            return [(source, lineno, raw)]
+
+        name = match.group(1)
+        if name not in self.macros:
+            raise AsmError(f"{source}:{lineno}: unknown macro {name}")
+        if name in expansion_stack:
+            chain = " -> ".join([*expansion_stack, name])
+            raise AsmError(f"{source}:{lineno}: recursive macro expansion: {chain}")
+
+        parameters, body, _, _ = self.macros[name]
+        argument_text = match.group(2) or ""
+        arguments = split_operands(argument_text) if argument_text else []
+        if len(arguments) != len(parameters):
+            raise AsmError(
+                f"{source}:{lineno}: macro {name} expects {len(parameters)} "
+                f"arguments, got {len(arguments)}"
+            )
+
+        self.macro_expansion_id += 1
+        unique_prefix = f"__macro_{name}_{self.macro_expansion_id}_"
+        replacements = dict(zip(parameters, arguments))
+        expanded: list[tuple[Path, int, str]] = []
+        for body_line in body:
+            line = re.sub(
+                r"%%([A-Za-z_][A-Za-z0-9_]*)",
+                lambda local: unique_prefix + local.group(1),
+                body_line,
+            )
+            for parameter, value in replacements.items():
+                line = line.replace("{" + parameter + "}", value)
+            expanded.extend(
+                self._expand_macro_line(
+                    source, lineno, line, [*expansion_stack, name]
+                )
+            )
+        return expanded
 
     def assemble(self) -> tuple[int, bytes, dict[str, int]]:
         self.pass_no = 1
@@ -238,19 +352,33 @@ class Assembler:
     def _run_pass(self) -> bytearray:
         self.pc = 0
         output = bytearray()
-        for lineno, raw in enumerate(self.lines, 1):
+        for source, lineno, raw in self.lines:
             line = strip_comment(raw)
             if not line:
                 continue
             try:
                 emitted = self._line(line)
             except AsmError as exc:
-                raise AsmError(f"{self.source}:{lineno}: {exc}") from exc
+                raise AsmError(f"{source}:{lineno}: {exc}") from exc
             if self.origin is not None and self.pass_no == 2:
                 output.extend(emitted)
         return output
 
     def _line(self, line: str) -> bytes:
+        equ_match = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_]*)\s+equ\s+(.+)", line, re.IGNORECASE
+        )
+        if equ_match:
+            name, expression = equ_match.groups()
+            value = self.expr(expression, strict=True)
+            if self.pass_no == 1:
+                if name in self.defines or name in self.labels or name in self.constants:
+                    raise AsmError(f"duplicate symbol {name}")
+                self.constants[name] = value
+            elif self.constants.get(name) != value:
+                raise AsmError(f"constant changed between passes: {name}")
+            return b""
+
         while ":" in line:
             before, after = line.split(":", 1)
             label = before.strip()
@@ -265,6 +393,11 @@ class Assembler:
         parts = line.split(None, 1)
         op = parts[0].lower()
         rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if op == "assert":
+            if self.pass_no == 2 and not self.expr(rest):
+                raise AsmError(f"assertion failed: {rest}")
+            return b""
 
         if op == "org":
             value = self.expr(rest)
@@ -321,17 +454,21 @@ class Assembler:
                 data.append(self.expr(item) & 0xFF)
         return bytes(data)
 
-    def expr(self, text: str) -> int:
+    def expr(self, text: str, strict: bool = False) -> int:
         text = text.strip()
         env = dict(self.defines)
+        env.update(self.constants)
         env.update(self.labels)
         env["HIGH"] = lambda x: (int(x) >> 8) & 0xFF
         env["LOW"] = lambda x: int(x) & 0xFF
-        env["$"] = self.pc
+        # '$' is conventional assembler syntax but not a Python identifier.
+        # Rewrite it before evaluating the deliberately restricted expression.
+        text = text.replace("$", "__PC__")
+        env["__PC__"] = self.pc
         try:
             value = eval(text, {"__builtins__": {}}, env)
         except NameError:
-            if self.pass_no == 1:
+            if self.pass_no == 1 and not strict:
                 return 0
             raise
         except Exception as exc:
@@ -531,6 +668,9 @@ class Assembler:
 
         if dst_l == "(de)" and src_l == "a":
             return b"\x12"
+
+        if dst_l == "(bc)" and src_l == "a":
+            return b"\x02"
 
         if dst_l == "(hl)":
             if src_l in REG8:

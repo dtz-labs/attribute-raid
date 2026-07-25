@@ -1,9 +1,11 @@
 .PHONY: all standard timex run run-48 run-timex run-tc2048 run-tc2068 \
-	run-ts2068 profile run-profile zesarux-config clean
+	run-ts2068 profile run-profile profile-timex run-profile-timex \
+	zesarux-config clean
 
 OUTDIR := build
 TAP := $(OUTDIR)/attribute-raid.tap
 TIMEX_TAP := $(OUTDIR)/attribute-raid-timex.tap
+ASM_SOURCES := $(wildcard src/*.asm)
 DEFINES ?=
 ZESARUX ?= /Applications/ZEsarUX.app/Contents/MacOS/zesarux
 ZESARUX_CONFIG ?= $(abspath tools/zesarux.rc)
@@ -27,10 +29,10 @@ standard: $(TAP)
 
 timex: $(TIMEX_TAP)
 
-$(TAP): src/main.asm tools/build.py | $(OUTDIR)
+$(TAP): $(ASM_SOURCES) tools/build.py | $(OUTDIR)
 	python3 tools/build.py $(DEFINES) src/main.asm $(OUTDIR)
 
-$(TIMEX_TAP): src/main.asm tools/build.py | $(OUTDIR)
+$(TIMEX_TAP): $(ASM_SOURCES) tools/build.py | $(OUTDIR)
 	python3 tools/build.py $(DEFINES) -D TIMEX_HICOLOR=1 \
 		--basename attribute-raid-timex src/main.asm $(OUTDIR)
 
@@ -71,6 +73,12 @@ profile:
 run-profile:
 	$(MAKE) OUTDIR=build-profile DEFINES="-D PROFILE_BORDER=1" run
 
+profile-timex:
+	$(MAKE) OUTDIR=build-profile-timex DEFINES="-D PROFILE_BORDER=1" timex
+
+run-profile-timex:
+	$(MAKE) OUTDIR=build-profile-timex DEFINES="-D PROFILE_BORDER=1" run-tc2068
+
 # Re-copy the real joystick mapping from the global ZEsarUX config into
 # tools/zesarux.rc, keeping everything above the sentinel line intact.
 zesarux-config:
@@ -88,4 +96,4 @@ zesarux-config:
 	echo "Updated $(ZESARUX_CONFIG) from $(HOME)/.zesaruxrc"
 
 clean:
-	rm -rf build build-profile build-timex
+	rm -rf build build-profile build-profile-timex build-timex

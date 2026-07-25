@@ -13,10 +13,11 @@ may now begin on any pixel rather than only on a coarse four-pixel grid. The
 banks still scroll smoothly by one pixel. The renderer never copies or scrolls
 the complete screen bitmap. It updates
 only the scanlines that have just crossed a world-block boundary. The standard
-Spectrum build erases and redraws moving sprites with XOR. The Timex build
-keeps ordinary water/shore actors visible during the bank pass and redraws
-that safe group by overwriting complete zero/one rows. The wide bridge is
-maintained incrementally in both builds.
+Spectrum and Timex builds share one resident bitmap-sprite engine: ordinary
+sprites are never blanked wholesale or erased with XOR. Exposed top/side bytes
+are restored and the final zero/one rows are stored directly. Only short impact
+and crash explosions intentionally use XOR. Timex adds its separate 8x1 colour
+pass after the common bitmap work. The wide bridge is incremental in both.
 
 This is still a prototype rather than a complete game, but it has the basic
 gameplay loop: aircraft controls, two speed modifiers, firing, collisions, two
@@ -48,6 +49,8 @@ make standard     # build only the 48K/128K TAP
 make timex        # build only the Timex 8x1 TAP
 make profile      # the border shows the duration of a complete game update
 make run-profile
+make profile-timex      # the same timing build for Timex 8x1
+make run-profile-timex
 make zesarux-config  # re-copy the host joystick mapping from ~/.zesaruxrc
 make clean
 ```
@@ -91,13 +94,21 @@ The program starts at address `32768` (`0x8000`). `tools/build.py` implements
 the small subset of Z80 instructions used by the game and generates both the
 BASIC loader and TAP file, so no external Z80 toolchain is required.
 
+The assembly is split by responsibility: `main.asm` owns startup, the main
+loop, Spectrum attributes and screen states; course, entities, resident sprite
+rendering, Timex attributes, AY sound, input, sprite data and writable state
+live in separate `src/*.asm` includes. The built-in preprocessor supports
+`#include`, conditional builds, `equ`, `assert`, and small parameter macros:
+`#macro NAME arg`, `{arg}` substitution, `@NAME value`, and expansion-local
+labels beginning with `%%`. `make` tracks every included assembly file.
+
 ## Controls
 
 - `O` / `P` — move the player aircraft left / right at 2 px per frame,
 - no speed key — base scrolling speed of 1 px per frame,
 - hold `Q` — adaptive fast scrolling: 1/2 px alternating (1.5 px average) in
-  light scenes, capped at 1 px while a tank, bridge, road, or projectile is
-  active,
+  light scenes, capped at 1 px while a tank, crossing aircraft, bridge, road,
+  or projectile is active,
 - hold `A` — temporarily reduce scrolling to an average of 0.5 px per frame,
 - `SPACE` — fire,
 - `R` — start a new game with two lives, a zero score, and a new course.
@@ -119,11 +130,14 @@ water width ranges from a brief 72-pixel narrow to 224 pixels, leaving at least
 16 pixels of land at each side. An edge moves by at most four pixels between
 adjacent blocks.
 
-Thirty-two blocks form a ring. Six page-aligned arrays store:
+Thirty-two blocks form a ring. Page-aligned tables store:
 
-- the left-bank column and mask,
-- the right-bank column and mask,
+- exact pixel bounds plus the left/right bank columns and masks,
 - the optional left and right edges of an island.
+
+Each generated block also materializes its complete 32-byte terrain template
+and a short list of bytes that differ from its predecessor. A dirty scanline
+normally replays only that list instead of repeating bank/island comparisons.
 
 An island is a third land interval inside the river. It grows over consecutive
 blocks, maintains its width, and then narrows, creating a real fork without a
@@ -133,24 +147,25 @@ two-scanline dashed centre marking extends across the land on both sides.
 
 The first two character rows are a blank black upper margin. The river occupies
 152 scanlines (`Y=16..167`). The final three character rows form a fixed status
-panel: the compact lives/fuel/score line, a 24-segment fuel bar, and the
-copyright footer. Each scroll sample changes only one eighth of the
-playfield scanlines, so the renderer updates:
+panel: one black separator row, the compact lives/fuel/score row, and the
+copyright footer. Each scroll sample changes only one eighth of the playfield
+scanlines, so the renderer updates:
 
 - 19 scanlines at 1 px per frame,
 - 38 scanlines at 2 px per frame.
 
-On every affected scanline it writes three bytes around the left bank, three
-around the right bank, and—only during a fork—a short island interval. The full
-6144-byte bitmap is rendered only during startup and after `R`.
+On every affected scanline it normally replays only the precomputed bytes whose
+terrain value changed; complex fork transitions fall back to the bounded edge
+renderer. The full 6144-byte bitmap is rendered only during startup and after
+`R`.
 
 ## Colour, bridge, and sprites
 
 Normal attribute cells use `0x4c`: BRIGHT 1, green INK, and blue PAPER. A set
 bitmap bit represents land or a visible object; a clear bit represents water.
-The bridge temporarily changes its cells to `0x0a`, producing dark red/brown
-INK over blue PAPER. The original Spectrum has no dedicated brown colour, so
-dark red is the closest solid colour without dithering.
+The bridge temporarily changes its cells to `0x4a`, producing bright red
+INK over bright blue PAPER. The original Spectrum has no dedicated brown
+colour, so bright red is used to keep the water brightness unchanged.
 
 The bridge is also a bitmap object, so it may begin at any Y position and move
 smoothly by one pixel. Standard Spectrum attributes are tied to an 8×8 grid;
@@ -160,22 +175,22 @@ updates only an entering or departing attribute row instead of repainting the
 whole rectangle in the standard build. The Timex build uses one attribute row
 per bitmap scanline, so its bridge colour follows the moving bitmap exactly.
 
-Road cells on the banks use white INK over black PAPER, while the part above
-the river retains the red/brown bridge colour. Two central scanlines contain
-alternating eight-pixel gaps. Only the 1–2 centre lines entering or leaving the
-road are changed during scrolling. The effect does not use the physical screen
-border: the experimental border raster reduced animation to roughly 25 Hz and
-has been removed.
+Road cells on the banks use bright white INK over green PAPER, while the part
+above the river retains the red/brown bridge colour. Two central scanlines
+contain alternating eight-pixel green gaps. This keeps both the road and bank
+colours meaningful in a shared Spectrum attribute cell. Only the 1–2 centre
+lines entering or leaving the road are changed during scrolling. The effect
+does not use the physical screen border: the experimental border raster
+reduced animation to roughly 25 Hz and has been removed.
 
-The player, ship, crossing aircraft, and helicopter silhouettes were
-reconstructed from the interlaced object data of the Atari 2600 River Raid and
-expanded horizontally by 2×. The public
+The sprite shapes were suggested by screenshots of the Atari 2600 River Raid
+and expanded horizontally by 2×. The public
 [River Raid disassembly](https://gitlab.com/menelkir/atari-2600/-/blob/master/River%20Raid%20%28decomp%29.asm)
 was used as a reference. The tank is a new silhouette drawn under the same
 eight-bit-source and 2× horizontal expansion constraints. Steering selects
-the original Atari `JetMove` silhouette, reflected exactly for the opposite
-direction as the 2600 did with `REFP0`; releasing the direction returns to the
-level-wing sprite without leaving XOR trails.
+the original Atari `JetMove` swept-wing silhouette and reflects it exactly for
+the opposite direction, as the 2600 did with `REFP0`; releasing the direction
+returns to the level-wing sprite without leaving XOR trails.
 
 The helicopter now uses the actual `Heli0A/B` and `Heli1A/B` data from the
 Atari disassembly. Interleaving the A/B kernel rows produces the ten visible
@@ -221,19 +236,15 @@ without frame skipping. The static balloon, fuel, tanks, projectiles, and short
 explosion effects are not counted because they have separate gameplay roles
 and appear only periodically.
 
-The standard renderer and all sprites which can cross mixed terrain use XOR.
-On Timex, ships, helicopters, balloons and FUEL are guaranteed to remain over
-zero bitmap bytes (water), while the shore tank remains over full land bytes.
-Their redraw therefore overwrites complete source rows, storing transparent
-zeroes as well as opaque ones instead of performing an additive draw. Those
-actors remain visible during the expensive dirty-bank pass. On ordinary Timex
-frames, a scrolling ship is advanced in place: only the one or two departing
-top rows and an exposed side byte are restored before the complete new shape
-is written. It is never blanked as a whole between frames. Bridges remain
-incremental too; only their departing/entering rows and moving edge details are
-updated. The player, crossing aircraft, projectiles, explosions and bridge tank
-retain the masked path because an opaque rectangle could otherwise cut a bank
-edge or a road marking.
+Both builds use the same bitmap compositor. Ships, helicopters, balloons and
+FUEL occupy guaranteed water; the shore tank occupies full land. Their final
+rows can therefore be stored directly, including transparent zeroes. The
+player, crossing aircraft and bridge tank combine cached masks with a
+materialized terrain row before storing the final bytes, so they do not cut a
+bank edge or road marking. A scrolling actor restores only departing top rows
+and any exposed side byte before writing its new shape; it is never blanked as
+a whole between frames. The bridge likewise updates only entering/departing
+rows and moving edge details. XOR is reserved for explosions.
 
 The blitters support arbitrary bit offsets, so 1–3 px movement is not
 implemented as a series of eight-pixel jumps. Eight shifted variants of each
@@ -258,10 +269,10 @@ does not require two complete passes over the rectangle.
 
 ## Collision and gameplay details
 
-Bank collision no longer relies on rectangular branch bounds. Every opaque
-pixel of the 16×14 player mask is compared with the actual bitmap. A set bit
-means bank, island, or intact bridge. Transparent sprite corners cannot cause
-an early crash, and both sides of an island behave identically.
+Bank collision does not sample the sprite-filled framebuffer. A forgiving 6×6
+core of the player is checked against exact pixel bank bounds, island intervals
+and the intact bridge for each covered world row. This avoids both framebuffer
+ambiguity and deaths caused by transparent wing corners.
 
 A separate forgiving 6×6 player core checks collisions with the 32-pixel
 ships, balloon, helicopter, crossing aircraft, the bridge tank, and the shared
@@ -275,13 +286,11 @@ lethal; the splash itself is harmless. The shore tank waits 72 frames before
 its first shot and 96 frames between later shots, making its fire less frequent
 but more dangerous once a shell is in flight.
 
-The 32-column HUD displays `LIVES:n FUEL:###### SCORE:nnnnnn` in the first row
-of the bottom panel. A second line shows `FUEL: [########################]`.
-The copyright line remains static throughout active gameplay; it scrolls only
-on the waiting screen between games, so it adds no copying to a gameplay frame.
-The compact six fuel cells represent eight units each, while each segment of
-the detailed bar represents two units. One unit is consumed every 32 frames;
-while the player overlaps
+The 32-column HUD displays `LIVES:n FUEL:###### SCORE:nnnnnn` in its only status
+row. The copyright line remains static throughout active gameplay; it scrolls
+only on the waiting screen between games, so it adds no gameplay copying. Each
+fuel cell represents eight units and the HUD is dirtied only when one of those
+thresholds is crossed. One unit is consumed every 32 frames; while the player overlaps
 `FUEL`, consumption pauses and one unit is restored every five frames. Reaching
 zero causes a crash. Labels are copied only when the screen is created. Later
 updates touch only the changed life digit, fuel cells, or the shortest score
@@ -307,8 +316,7 @@ its own lightweight spawn delay, while the crossing aircraft remains destroyed
 for the rest of the current scene. Projectile collision tests the complete
 ten-scanline swept interval, so a six-pixel movement cannot tunnel through an
 eight-line hull. The crossing aircraft is tested explicitly because it may fly
-above land and its XOR image has already been erased during collision
-processing.
+above land as well as water.
 
 After moving-target tests, the projectile's two solid pixels are checked over
 all ten scanlines of the swept path. They must remain over clear bitmap bits,
@@ -326,25 +334,28 @@ only the old and new 13-row explosion phases are XORed every fifth frame.
 The player projectile can destroy a bridge, now with both a visible impact and
 an AY explosion. A bridge alone is worth 200 points. If a crossing tank is
 already on the span, the same shot also removes the tank and awards 500 points
-in total. A tank waiting and firing on a white road approach survives bridge
-destruction. A crossing tank which has not reached the span also survives,
-stops on the remaining road, and switches to the firing behaviour. Ships,
+in total. A crossing tank which has not reached the span survives bridge
+destruction, stops on the remaining road, and only then switches to firing
+behaviour. Ships,
 helicopters, and fuel are kept at
 least eight pixels outside the bridge's vertical band and cannot pass through
 it. The bridge tank is intentionally exempt. The shore and bridge tanks have
 separate actor state and can appear simultaneously; only their projectile slot
-is shared. Bridge behaviours alternate, with the first bridge guaranteed to
-use the crossing behaviour and the next tank stopping to fire. A crossing tank
-starts at pixel X=0 or X=240 and remains active until its hull reaches the
-opposite screen edge; leaving the bridge span no longer removes it. At base
-speed it alternates one- and two-pixel steps, averaging 1.5 px per frame instead
-of the former 2 px. This sideways speed is independent of the player's Q/A
-scroll modifier.
+is shared. Every tank on an intact bridge drives across it and never fires. A
+crossing tank starts at pixel X=0 or X=240 and remains active until its hull
+reaches the opposite screen edge; leaving the bridge span no longer removes
+it. At base speed it alternates one- and two-pixel steps, averaging 1.5 px per
+frame instead of the former 2 px. This sideways speed is independent of the
+player's Q/A scroll modifier.
+
+Bridge placement alternates between the naturally reached river width and a
+deliberately narrow section (at most roughly 112 pixels of water), so not every
+crossing is generated over a broad river.
 
 Destroying a bridge clears all 16 affected bitmap scanlines before rebuilding
 the complete banks, island, and river. The brown centre span becomes blue
-water, while the white road approaches and their dashed markings remain on
-both banks and keep scrolling down with the world. A dedicated full-row repair
+water, while the white road approaches and their green dashed markings remain
+on both banks and keep scrolling down with the world. A dedicated full-row repair
 path is used when each dashed line leaves the road; the normal dirty renderer
 updates only bank edges and therefore cannot reconstruct a row which has been
 cleared completely.
@@ -375,52 +386,40 @@ Engine registers are rewritten only when the requested speed changes. A stock
 
 ## Performance budget
 
-The latest ZEsarUX debugger measurements made before the white road and centre
-markings were added, at the 2 px-per-frame speed, were:
+A 48K 50 Hz frame contains 69,888 T-states. Current ZEsarUX profiling after the
+resident-player and terrain-delta changes observed ordinary early-game frames
+between roughly 32,000 and 54,000 T-states. A longer generated session with
+several actors, bridge, bridge tank and shell sampled approximately
+31,000–60,000 T-states; comparable heavy scenes before these changes reached
+75,000–86,000.
 
-- 57,807 T-states for an ordinary full update,
-- 64,796 T-states with an active 22-byte-wide bridge,
-- 69,089 T-states in an artificially forced maximum with the bridge and both
-  projectiles active.
+Targeted TC2068 debugger measurements put a one-pixel dirty terrain pass at
+10,564 T-states before its incremental-address rewrite and 8,404 afterwards
+(about 20% less). A forced Timex pass containing FUEL, balloon, helicopter and
+tank fell from 11,179 to 8,680 T-states (about 22% less). The terrain figure was
+captured just before the final rare ring-wrap guard was added, so it documents
+the size of the improvement rather than an exact current-cycle promise. These
+are samples, not a claimed exhaustive worst case; `make profile` and
+`make profile-timex` remain the source of truth for a particular scene.
 
-A 50 Hz frame contains 69,888 T-states. The road does not redraw the complete
-bridge. At 1 px per frame it restores one centre line and adds one; at 2 px it
-does the same for two lines. Restoration writes only the 16 bytes that actually
-contained black dashes. The left road, bridge span, and right road attributes
-are written in one 32-byte pass rather than painting the full row white and
-then overwriting the wide centre.
+The main savings are structural. Sprite shifts are generated once at startup;
+water blitters consume a table of Spectrum scanline addresses with `POP HL`;
+terrain rows are materialized once per generated course block; and dirty rows
+replay precomputed `(column,value)` differences. The stationary player no
+longer recomposes all fourteen rows every frame: without steering it repairs
+only the two terrain residues touched at normal speed (four on a two-pixel
+phase). Full player composition is reserved for X/pose changes and bridge-road
+overlap.
 
-The interactive fast mode no longer combines a two-pixel bank pass with a tank,
-bridge/road repair, or either projectile. Light frames alternate one and two
-pixels; heavy frames are capped at one, avoiding the former worst-case stack-up
-while retaining a faster average course speed when headroom is available.
-The profiling border covers input and AY updates as well as rendering, so a
-Q-specific timing regression is visible in the measured frame budget.
-Moving-object attributes now calculate their first cell once and advance by the
-linear 32-byte attribute-row stride. `FUEL` uses one pass for all of its
-alternating colour bands instead of restarting the generic painter per row.
+The interactive fast mode does not combine a two-pixel bank pass with a tank,
+crossing aircraft, bridge/road repair, or either projectile. Light frames
+alternate one and two pixels; heavy frames are capped at one. The profiling
+border covers input and AY work as well as rendering, so Q-specific regressions
+remain visible.
 
-Every active frame begins with `HALT`, synchronized to the 50 Hz display
-interrupt. In the Timex build, each 8×1 object painter likewise calculates its
-first interleaved attribute address once and advances directly between
-scanlines. Ordinary water/shore actors and their old colours remain resident
-through the dirty-bank pass and most movement logic; only the bridge/projectile
-collision tail lies between direct background restoration and opaque redraw.
-Old 8×1 footprints are restored only after the new bitmaps and colours are
-present, and only on rows or byte columns which no longer overlap the object.
-A busy frame may therefore slow the world update without leaving those
-silhouettes erased or green for an entire displayed frame. This is
-raster-synchronized incremental rendering, not page flipping.
-
-The precise current worst case still needs to be remeasured in the debugger,
-so the values above must not be treated as timings for the current build. A
-special five-byte blitter draws each wide ship in one pass; composing it from
-two ordinary sprites would require setting up the scanline table and `SP`
-twice. The new two-actor water-combat cap also prevents the old four-enemy
-maximum from occurring in normal play. The generator schedules bridges and
-forks as separate course features, so their most expensive paths do not
-overlap in normal generation.
-
-A consistency test removed all moving sprites and compared all 6144 bitmap
-bytes with a full reconstruction from the course ring. The number of differing
-bytes was `0`.
+Every active frame begins with `HALT`, synchronized to the display interrupt.
+Both builds keep ordinary bitmaps resident; Timex then advances its 8×1
+attribute pointers linearly and cleans only attribute rows/columns no longer
+covered by the current object. A busy frame may slow the world without leaving
+silhouettes erased for an entire displayed frame. This is an incremental,
+raster-synchronized renderer, not page flipping or a second screen buffer.
