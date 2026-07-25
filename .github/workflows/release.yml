@@ -22,13 +22,16 @@ jobs:
       - name: Compile TAP file
         run: make
 
-      - name: Package TAP file
+      - name: Package TAP files
         run: |
           set -eu
           mkdir -p dist
           zip -j "dist/attribute-raid-${GITHUB_REF_NAME}-tap.zip" \
             build/attribute-raid.tap
+          zip -j "dist/attribute-raid-timex-${GITHUB_REF_NAME}-tap.zip" \
+            build/attribute-raid-timex.tap
           unzip -l "dist/attribute-raid-${GITHUB_REF_NAME}-tap.zip"
+          unzip -l "dist/attribute-raid-timex-${GITHUB_REF_NAME}-tap.zip"
 
       - name: Publish beta GitHub release
         env:
@@ -42,7 +45,7 @@ jobs:
             gh release create "${GITHUB_REF_NAME}" dist/*.zip \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Attribute Raid ${GITHUB_REF_NAME} (Beta)" \
-              --notes "Beta release of Attribute Raid. The core gameplay is playable, but level progression and final balancing are not complete yet." \
+              --notes "Beta release of Attribute Raid in two versions: the standard ZX Spectrum 48K/128K build and the Timex 8x1 hi-colour build (TC2048/TC2068/TS2068). The core gameplay is playable, but level progression and final balancing are not complete yet." \
               --prerelease \
               --verify-tag
           fi
