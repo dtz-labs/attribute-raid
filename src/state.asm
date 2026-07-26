@@ -20,6 +20,7 @@ motion_timer: db 0
 lfsr: db 0xa7
 feature_countdown: db 40
 fork_step: db 0
+fork_hold: db 0                  ; extra blocks the island holds its broad middle
 next_feature: db 0
 bridge_spawn_pending: db 0
 bridge_spawn_next: db 0          ; bridge decided; spawn on the next block

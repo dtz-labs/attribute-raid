@@ -162,10 +162,14 @@ def main():
     # HALT; identify it as the most frequent PC inside the main_loop region.
     idle_pc, _ = counts.most_common(1)[0]
 
+    # ISR entries appear in consecutive runs; a frame boundary is the START
+    # of a run, not every 0x0038 entry (counting each entry once inflated
+    # the frame count several-fold and made the overrun share nonsense).
     interrupts = 0
     frames_with_idle = 0
     idle_run = 0
     saw_idle_this_frame = False
+    prev = None
     for pc in trace:
         if pc == idle_pc:
             idle_run += 1
@@ -173,11 +177,12 @@ def main():
                 saw_idle_this_frame = True
         else:
             idle_run = 0
-        if pc == ISR_ENTRY:
+        if pc == ISR_ENTRY and prev != ISR_ENTRY:
             interrupts += 1
             if saw_idle_this_frame:
                 frames_with_idle += 1
             saw_idle_this_frame = False
+        prev = pc
 
     with open(out_path, "w") as f:
         f.write(f"trace: {total} instructions (chronological tail)\n")

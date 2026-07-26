@@ -138,8 +138,9 @@ and a short list of bytes that differ from its predecessor. A dirty scanline
 normally replays only that list instead of repeating bank/island comparisons.
 
 An island is a third land interval inside the river. It grows over consecutive
-blocks, maintains its width, and then narrows, creating a real fork without a
-second renderer or screen buffer. The bridge remains a separate object. It
+blocks, maintains its width for a randomized stretch of up to a few screens
+(both lanes keep meandering with the river centre), and then narrows, creating
+a real fork without a second renderer or screen buffer. The bridge remains a separate object. It
 matches the current river width and is 16 scanlines high. A road extends
 across the land on both sides, and the course generator keeps both banks
 straight in the span's immediate vicinity - a few blocks below and above it -
@@ -272,11 +273,12 @@ retries later. A bridge conflict likewise removes a water actor and queues a
 fresh top entry instead of teleporting it into a free lane halfway down the
 screen.
 
-Bridge boards are kept as a calm corridor: every recurring spawn — patrol
-ships, the crossing aircraft, helicopters, balloons, FUEL, and shore tanks —
-is held while a bridge is scheduled within one screenful of arriving, queued,
-on screen, or while its destroyed road is still scrolling through. The tank
-crossing the bridge is the corridor's only actor.
+Bridge boards are kept as a calm corridor: the heavy movers — the patrolling
+ship, the crossing aircraft, helicopters, and shore tanks — hold while a
+bridge is scheduled within one screenful of arriving, queued, on screen, or
+while its destroyed road is still scrolling through. The static ship, the
+balloon, and FUEL still appear there, and the tank crossing the bridge stays
+the corridor's only heavy actor.
 
 The bridge is not erased in full while scrolling. Each frame restores only the
 1–2 scanlines leaving its top, adds new scanlines at the bottom, and refreshes

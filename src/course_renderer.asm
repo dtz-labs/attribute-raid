@@ -27,6 +27,7 @@ init_course:
     ld (feature_countdown),a
     xor a
     ld (fork_step),a
+    ld (fork_hold),a
     ld (next_feature),a
     ld (bridge_spawn_pending),a
     ld (bridge_spawn_next),a
@@ -106,6 +107,22 @@ generate_block_banks_move:
     ld b,a
     ld a,(half_step)
     add a,b
+    ld d,a
+    ; While the island splits the river, hold a higher floor: the broad
+    ; middle takes 32 of the centre pixels, so half-width 56 keeps every
+    ; lane at least 33 pixels navigable even if a random bend narrows.
+    ld a,(fork_step)
+    or a
+    ld a,d
+    jr z,half_x_no_fork_floor
+    cp 56
+    jr nc,half_x_no_fork_floor
+    ld a,56
+    ld (gen_half_x),a
+    ld a,2
+    ld (half_step),a
+    jr half_x_ready
+half_x_no_fork_floor:
     cp 36
     jr nc,half_x_not_low
     ; The ordinary river may briefly narrow to 72 pixels. Fork generation
@@ -550,7 +567,7 @@ update_course_feature:
 
     ld a,(fork_step)
     or a
-    jr nz,generate_fork_block
+    jp nz,generate_fork_block
 
     ld a,(feature_countdown)
     dec a
@@ -570,6 +587,12 @@ generate_fork_feature:
     ld a,1
     ld (next_feature),a
     ld (fork_step),a
+    ; Vary how long the island lasts: 16..47 extra blocks of the broad
+    ; middle phase, so a split river can run for a few screens.
+    ld a,(lfsr)
+    and 31
+    add a,16
+    ld (fork_hold),a
     ld a,2                          ; a fork always opens into safe wide lanes
     ld (half_step),a
     jr generate_fork_block
@@ -615,7 +638,7 @@ generate_bridge_now:
     ld (flat_right_x),a
     ld a,6
     ld (bridge_straight_blocks),a
-    ld a,24
+    ld a,32                         ; a slightly longer breather after a bridge
     ld (feature_countdown),a
     ret
 
@@ -643,13 +666,26 @@ generate_fork_block:
     add a,b
     ld (generated_island_right),a
 
+    ; Hold the island at its broad middle step for fork_hold extra blocks,
+    ; stretching the split river up to a few screens. Both lanes keep
+    ; meandering with the centre while held.
+    ld a,(fork_step)
+    cp 5
+    jr nz,fork_step_advances
+    ld a,(fork_hold)
+    or a
+    jr z,fork_step_advances
+    dec a
+    ld (fork_hold),a
+    ret
+fork_step_advances:
     ld a,(fork_step)
     inc a
     cp 11
     jr c,store_fork_step
     xor a
     ld (fork_step),a
-    ld a,24
+    ld a,32                         ; a slightly longer run-up to the bridge
     ld (feature_countdown),a
     ret
 store_fork_step:

@@ -106,9 +106,7 @@ wait_for_ship0:
     ld (ship0_delay),a
     ret
 try_spawn_ship0:
-    call bridge_scene_active
-    or a
-    jr nz,defer_ship0_spawn
+    ; The static ship is light enough for a bridge board, so it is not gated.
     call can_spawn_water_enemy
     or a
     jr nz,spawn_ship0
@@ -657,9 +655,7 @@ wait_for_balloon:
     ld (balloon_delay),a
     ret
 try_spawn_balloon:
-    call bridge_scene_active
-    or a
-    jr nz,defer_balloon_spawn
+    ; The static balloon is allowed on bridge boards.
     ld a,16
     call choose_clear_water_actor_y
     cp 16
@@ -725,16 +721,14 @@ update_fuel_waiting:
     ld (fuel_delay),a
     jp consume_fuel
 spawn_fuel:
-    call bridge_scene_active
-    or a
-    jr nz,defer_fuel_spawn
+    ; FUEL keeps spawning on bridge boards - the corridor bans only the
+    ; heavy movers (patrolling ship, helicopter, crossing plane, shore tank).
     ld a,16
     call choose_clear_fuel_y
     cp 16
     jr z,spawn_fuel_at_top
     ; A crowded entrance used to move the depot to an arbitrary on-screen Y.
     ; Wait instead, so FUEL always arrives from the top of the playfield.
-defer_fuel_spawn:
     ld a,16
     ld (fuel_delay),a
     jp consume_fuel

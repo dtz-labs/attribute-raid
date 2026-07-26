@@ -1713,6 +1713,7 @@ transition_enemy_check_side:
     srl a
     cp d
     jr z,transition_enemy_draw
+    jr c,transition_enemy_wrapped   ; X wrapped from the right edge to zero
     ld a,(sprite_old_enemy_y)
     ld b,a
     ld c,8
@@ -1722,6 +1723,21 @@ transition_enemy_draw:
     jp draw_current_enemy_plane_direct
 transition_enemy_spawned:
     jp draw_current_enemy_plane_direct
+transition_enemy_wrapped:
+    ; The whole old footprint leaves at once, not just one column. Repaint
+    ; its full two-or-three byte width with the world background, or the
+    ; right screen edge keeps a slice of the aircraft.
+    ld a,b                          ; old X, still held in B
+    and 7
+    ld e,2
+    jr z,transition_enemy_wrap_width_ready
+    inc e
+transition_enemy_wrap_width_ready:
+    ld a,(sprite_old_enemy_y)
+    ld b,a
+    ld c,8
+    call fill_world_background_rect
+    jr transition_enemy_draw
 
 transition_enemy_exception:
     xor a
@@ -2470,6 +2486,10 @@ reset_world_background_cache:
 fill_world_background_rect:
     ; Input B=Y, C=rows, D=column, E=width. Reconstruct only exposed bytes of
     ; a sprite which may cross mixed terrain; never repaint an entire row.
+    ; Course rows are straight copies of the materialized block rows; only
+    ; road-band rows keep the per-byte query engine, and the off-playfield
+    ; margins are plain water zeroes. The old all-byte engine dominated the
+    ; overrun frames of every bridge board carrying any sprite.
     ld a,c
     or a
     ret z
@@ -2485,6 +2505,71 @@ fill_world_background_rect:
     ld a,e
     ld (transition_fill_width),a
 fill_world_background_row:
+    ld a,(transition_fill_y)
+    cp 16
+    jr c,fill_world_row_zero
+    cp PLAYFIELD_BOTTOM
+    jr nc,fill_world_row_zero
+#if TIMEX_HICOLOR
+    ld a,(bridge_active)
+    or a
+    jr z,fill_world_row_fast
+#else
+    ld a,(bridge_active)
+    ld b,a
+    ld a,(destroyed_road_active)
+    or b
+    jr z,fill_world_row_fast
+#endif
+    ld a,(bridge_y)
+    ld b,a
+    ld a,(transition_fill_y)
+    cp b
+    jr c,fill_world_row_fast
+    sub b
+    cp 16
+    jr c,fill_world_row_slow
+fill_world_row_fast:
+    ld a,(transition_fill_y)
+    ld (background_query_y),a
+    call resolve_course_block_index
+    ld b,a
+    ld a,(transition_fill_col)
+    ld c,a
+    ld a,b
+    call block_bitmap_address
+    push hl
+    ld a,(transition_fill_y)
+    call calc_screen_line_addr
+    ld a,(transition_fill_col)
+    add a,l
+    ld e,a
+    ld d,h
+    pop hl
+    ld a,(transition_fill_width)
+    ld b,a
+fill_world_fast_byte:
+    ld a,(hl)
+    ld (de),a
+    inc l
+    inc e
+    djnz fill_world_fast_byte
+    jr fill_world_row_next
+fill_world_row_zero:
+    ld a,(transition_fill_y)
+    call calc_screen_line_addr
+    ld a,(transition_fill_col)
+    add a,l
+    ld l,a
+    ld a,(transition_fill_width)
+    ld b,a
+    xor a
+fill_world_zero_byte:
+    ld (hl),a
+    inc l
+    djnz fill_world_zero_byte
+    jr fill_world_row_next
+fill_world_row_slow:
     ld a,(transition_fill_y)
     call calc_screen_line_addr
     ld (row_screen_addr),hl
@@ -2511,13 +2596,14 @@ fill_world_background_byte_loop:
     dec a
     ld (sprite_fill_width),a
     jr nz,fill_world_background_byte_loop
+fill_world_row_next:
     ld a,(transition_fill_y)
     inc a
     ld (transition_fill_y),a
     ld a,(transition_fill_rows)
     dec a
     ld (transition_fill_rows),a
-    jr nz,fill_world_background_row
+    jp nz,fill_world_background_row
     ret
 
 write_water_sprite_1xn:
