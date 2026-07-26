@@ -246,7 +246,9 @@ requested_speed: db 1            ; raw Q/A/Kempston request before 0.5x phase
 slow_phase: db 0                 ; alternates 0/1 scroll for average 0.5 px
 joystick_state: db 0             ; sanitized Kempston bits 0..4
 ay_last_speed: db 255             ; avoids rewriting unchanged engine registers
-timex_ay_present: db 0            ; 1 only for a ROM-confirmed TC2068/TS2068
+timex_ay_present: db 0            ; 1 when the Timex build found an AY to use
+timex_ay_select: dw 0x00f5        ; latched AY register-select port
+timex_ay_data: dw 0x00f6          ; latched AY data port
 shot_sound_timer: db 0            ; tank shell sweep envelope, 25..0
 shot_sound_period: db 12           ; sweep period; grows by eight per frame
 missile_sound_ptr: dw 0           ; player missile cursor into the frame table

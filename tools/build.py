@@ -658,6 +658,8 @@ class Assembler:
             if mem is not None:
                 if dst_l == "hl":
                     return bytes([0x2A]) + self.u16(self.expr(mem))
+                if dst_l == "bc":
+                    return bytes([0xED, 0x4B]) + self.u16(self.expr(mem))
                 if dst_l == "de":
                     return bytes([0xED, 0x5B]) + self.u16(self.expr(mem))
                 if dst_l == "sp":

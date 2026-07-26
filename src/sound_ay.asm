@@ -49,24 +49,87 @@ detect_ay_output:
 #if TIMEX_HICOLOR
 detect_timex_2068_ay:
     ; TC2068 and TS2068 HOME ROMs contain "Timex" at $113D. The TC2048 ROM
-    ; does not, so this read-only test separates native-AY 2068 machines from
-    ; the otherwise compatible, beeper-only TC2048 before touching $F5/$F6.
+    ; does not, so this read-only test separates native-AY 2068 machines
+    ; (AY at $F5/$F6) from a TC2048 - which may still carry an optional AY
+    ; interface on the standard 128K ports, so probe before going silent.
     ld hl,0x113d
     ld de,timex_rom_signature
     ld b,5
 detect_timex_2068_byte:
     ld a,(de)
     cp (hl)
-    jr nz,detect_timex_ay_missing
+    jr nz,detect_tc2048_optional_ay
     inc de
     inc hl
     djnz detect_timex_2068_byte
+    ld hl,0x00f5                    ; native 2068 AY register/data ports
+    ld (timex_ay_select),hl
+    ld hl,0x00f6
+    ld (timex_ay_data),hl
     ld a,1
     ld (timex_ay_present),a
     ret
+
+detect_tc2048_optional_ay:
+    ; Probe $FFFD/$BFFD: both odd addresses, so the write never reaches the
+    ; TC2048 ULA and a machine without the interface just floats the bus.
+    ; R1 is a 4-bit register - only a real AY masks a written $FF down to
+    ; $0F - and R0 must round-trip $55 and $AA, which a floating bus fails.
+    ld hl,0xfffd
+    ld (timex_ay_select),hl
+    ld hl,0xbffd
+    ld (timex_ay_data),hl
+    ld e,0xff
+    ld a,1
+    call timex_probe_write
+    ld a,1
+    call timex_probe_read
+    cp 0x0f
+    jr nz,detect_timex_ay_missing
+    ld e,0x55
+    xor a
+    call timex_probe_write
+    xor a
+    call timex_probe_read
+    cp 0x55
+    jr nz,detect_timex_ay_missing
+    ld e,0xaa
+    xor a
+    call timex_probe_write
+    xor a
+    call timex_probe_read
+    cp 0xaa
+    jr nz,detect_timex_ay_missing
+    ld e,0
+    xor a
+    call timex_probe_write          ; leave R0 clean
+    ld e,0
+    ld a,1
+    call timex_probe_write          ; leave R1 clean
+    ld a,1
+    ld (timex_ay_present),a
+    ret
+
 detect_timex_ay_missing:
     xor a
     ld (timex_ay_present),a
+    ret
+
+timex_probe_write:
+    ; A=register, E=value on the standard ports; usable while the probe is
+    ; still deciding whether timex_ay_present may be set.
+    ld bc,0xfffd
+    out (c),a
+    ld a,e
+    ld b,0xbf
+    out (c),a
+    ret
+
+timex_probe_read:
+    ; A := value of register A, read back through the select port.
+    ld bc,0xfffd
+    out (c),a
+    in a,(c)
     ret
 #endif
 
@@ -465,18 +528,20 @@ silence_ay:
     ret
 
 ay_write_register:
-    ; Input A=register, E=value. TC2068/TS2068 expose their AY through the exact
-    ; 16-bit ports $00F5/$00F6; Spectrum 128K retains $FFFD/$BFFD.
+    ; Input A=register, E=value; preserves D and HL. TC2068/TS2068 expose
+    ; their AY through the exact 16-bit ports $00F5/$00F6, a TC2048 with an
+    ; optional interface uses $FFFD/$BFFD (both latched by the detector);
+    ; the Spectrum 128K build keeps compile-time $FFFD/$BFFD.
     push af
 #if TIMEX_HICOLOR
     ld a,(timex_ay_present)
     or a
     jr z,skip_timex_ay_write
     pop af
-    ld bc,0x00f5
+    ld bc,(timex_ay_select)
     out (c),a
     ld a,e
-    inc c                            ; BC=$00F6, AY data port
+    ld bc,(timex_ay_data)
     out (c),a
     ret
 skip_timex_ay_write:
