@@ -1,9 +1,11 @@
-# Attribute Raid — renderer V3
+# Attribute Raid
 
 Attribute Raid is a River Raid-style prototype with a ZX Spectrum 48K-compatible
 renderer and optional AY-3-8912 sound for the Spectrum 128K or a 48K machine
 with an AY interface. All code executed on the Spectrum is well-commented Z80
-assembly; there is no C runtime.
+assembly; there is no C runtime. A dedicated build uses the Timex TC2048/TC2068/
+TS2068 graphics modes: its 8×1 hi-colour screen gives every scanline its own
+colour pair instead of the Spectrum's 8×8 attribute cells.
 
 The sound effects, the sprites, and the sprite colours are unapologetically
 "stolen" from the Atari 2600 original: they were transcribed from Thomas
@@ -12,35 +14,23 @@ Jentzsch's commented disassembly of River Raid (Activision, 1982), archived at
 (originally `bjars.com/source/RiverRaid.asm`). Only derived register values
 and shapes are reproduced here, no original code.
 
+![Loading screen](assets/loading-screen.png)
+
+The loading screen above (`assets/loading-screen.png`) ships in both TAPs as a
+`SCREEN$` block, converted to the Spectrum's 6912-byte format in
+`assets/loading-screen.scr` and displayed while the code block loads.
+
 **Status:** `0.2.0` is a beta release. The core gameplay is playable, but level
-progression and final balancing are not complete yet.
-
-V3 keeps the Atari-style eight-scanline course cadence, while each bank edge
-may now begin on any pixel rather than only on a coarse four-pixel grid. The
-banks still scroll smoothly by one pixel. The renderer never copies or scrolls
-the complete screen bitmap. It updates
-only the scanlines that have just crossed a world-block boundary. The standard
-Spectrum and Timex builds share one resident bitmap-sprite engine: ordinary
-sprites are never blanked wholesale or erased with XOR. Exposed top/side bytes
-are restored and the final zero/one rows are stored directly. Only short impact
-and crash explosions intentionally use XOR. Timex adds its separate 8x1 colour
-pass after the common bitmap work. The wide bridge is incremental in both.
-
-This is still a prototype rather than a complete game, but it has the basic
-gameplay loop: aircraft controls, two speed modifiers, firing, collisions, two
-lives, fuel and refuelling, a crash animation, scoring, AY sound, and a `GAME
-OVER` screen. Complete level progression is not implemented yet.
+progression and final balancing are not complete yet: aircraft controls, two
+speed modifiers, firing, collisions, two lives, fuel and refuelling, a crash
+animation, scoring, AY sound, and a `GAME OVER` screen are in place.
 
 ## Building and running
 
 ```sh
-make
-make run
-make run-48       # graphics/gameplay only on a stock 48K machine
-make run-timex    # alias for TC2068: hi-colour plus native AY
-make run-tc2048   # hi-colour, no native AY chip
-make run-tc2068   # hi-colour plus AY at ports 00F5/00F6
-make run-ts2068   # US TS2068 variant
+make              # build both TAPs, no external Z80 toolchain required
+make run          # ZEsarUX as a Spectrum 128K with AY sound
+make run-timex    # ZEsarUX as a TC2068: 8x1 hi-colour plus native AY
 ```
 
 The default build produces two files:
@@ -49,69 +39,8 @@ The default build produces two files:
 - `build/attribute-raid-timex.tap` for the Timex TC2048/TC2068/TS2068
   hi-colour mode.
 
-Other targets are:
-
-```sh
-make standard     # build only the 48K/128K TAP
-make timex        # build only the Timex 8x1 TAP
-make profile      # the border shows the duration of a complete game update
-make run-profile
-make profile-timex      # the same timing build for Timex 8x1
-make run-profile-timex
-make zesarux-config  # re-copy the host joystick mapping from ~/.zesaruxrc
-make clean
-```
-
-### Emulator configuration
-
-The `run*` targets start ZEsarUX with `--configfile tools/zesarux.rc` instead
-of the global `~/.zesaruxrc`, so runs are reproducible and never overwrite
-your own settings. That file holds the emulated Kempston joystick plus the
-host joystick/pad mapping, and the emulator is told not to save it on exit.
-
-Remap the pad in a normal ZEsarUX session (which writes `~/.zesaruxrc`), then
-run `make zesarux-config` to copy the mapping back into `tools/zesarux.rc`.
-Extra one-off flags can still be passed via `ZESARUX_FLAGS`, for example
-`make run ZESARUX_FLAGS="--zoom 3"`.
-
-`make run` selects a Spectrum 128K in ZEsarUX so the AY soundtrack is audible.
-The program remains safe on a stock 48K machine, but its AY port writes have no
-chip to answer them and are therefore silent.
-
-The standard ZX Spectrum 128K still has 8×8 colour attributes; its shadow
-screen does not add an 8×1 mode. Use the standard TAP on that machine. The
-separate Timex TAP selects Extended Color mode through port `0xff`, where the
-second display file becomes 6144 scanline attributes. It therefore provides
-real 8×1 colour on the TC2048, TC2068, and TS2068, but its colours will not
-display correctly on an ordinary Spectrum 128K. The Timex build keeps the same
-bitmap, incremental renderer, controls, and 48K-sized game code.
-
-The TC2048 has no native AY chip, but one may be fitted as an optional
-interface, so the Timex TAP probes for it instead of going silent outright: a
-TC2068 or TS2068 is recognized from its HOME ROM signature and uses the
-native AY register/data ports `$00F5`/`$00F6`, while on a TC2048 the build
-tests the standard `$FFFD`/`$BFFD` ports (both odd addresses, so the ULA is
-never touched) and enables sound only when a real AY answers — register R1
-must mask a written `$FF` down to `$0F` and R0 must round-trip `$55`/`$AA`,
-which a floating bus fails. The standard TAP continues to use the Spectrum
-128K ports `$FFFD`/`$BFFD`. `make run-timex` therefore defaults to TC2068,
-while the model-specific targets make the selected hardware explicit.
-
-After loading, the game waits at a small start screen until SPACE or Kempston
-FIRE is pressed. Its copyright row scrolls on this screen and on the restart
-screen after `GAME OVER`, but becomes static for the whole active run.
-
-The program starts at address `32768` (`0x8000`). `tools/build.py` implements
-the small subset of Z80 instructions used by the game and generates both the
-BASIC loader and TAP file, so no external Z80 toolchain is required.
-
-The assembly is split by responsibility: `main.asm` owns startup, the main
-loop, Spectrum attributes and screen states; course, entities, resident sprite
-rendering, Timex attributes, AY sound, input, sprite data and writable state
-live in separate `src/*.asm` includes. The built-in preprocessor supports
-`#include`, conditional builds, `equ`, `assert`, and small parameter macros:
-`#macro NAME arg`, `{arg}` substitution, `@NAME value`, and expansion-local
-labels beginning with `%%`. `make` tracks every included assembly file.
+All remaining targets (profiling builds, per-model emulator runs, joystick
+configuration) are described in [docs/building.md](docs/building.md).
 
 ## Controls
 
@@ -123,336 +52,21 @@ labels beginning with `%%`. `make` tracks every included assembly file.
 - `R` — start a new game with two lives, a zero score, and a new course.
 
 The Kempston joystick supports left/right, FIRE, and temporary speed changes.
-Up is equivalent to `Q`, and down is equivalent to `A`. `make run` starts
-ZEsarUX with Kempston emulation enabled. After the second life is lost, release
-FIRE before pressing it again to start a new game; this prevents the `GAME
-OVER` screen from being skipped accidentally.
+Up is equivalent to `Q`, and down is equivalent to `A`. After loading, the game
+waits at a small start screen until SPACE or Kempston FIRE is pressed. After
+the second life is lost, release FIRE before pressing it again to start a new
+game; this prevents the `GAME OVER` screen from being skipped accidentally.
 
-## V3 course model
+## Documentation
 
-One course block represents eight world scanlines. Bank positions have
-one-pixel precision, but a bend keeps its direction for 4–7 blocks, or 32–56
-scanlines, so the outline remains a coherent shoreline rather than random
-single-block noise. The centre and half-width evolve independently: one bank
-may hold while the other turns, and the river can bend, narrow, or widen. Its
-water width ranges from a brief 72-pixel narrow to 224 pixels, leaving at least
-16 pixels of land at each side. An edge moves by at most four pixels between
-adjacent blocks.
-
-Thirty-two blocks form a ring. Page-aligned tables store:
-
-- exact pixel bounds plus the left/right bank columns and masks,
-- the optional left and right edges of an island.
-
-Each generated block also materializes its complete 32-byte terrain template
-and a short list of bytes that differ from its predecessor. A dirty scanline
-normally replays only that list instead of repeating bank/island comparisons.
-
-An island is a third land interval inside the river. It grows over consecutive
-blocks, maintains its width for a randomized stretch of up to a few screens
-(both lanes keep meandering with the river centre), and then narrows, creating
-a real fork without a second renderer or screen buffer. The bridge remains a separate object. It
-matches the current river width and is 16 scanlines high. A road extends
-across the land on both sides, and the course generator keeps both banks
-straight in the span's immediate vicinity - a few blocks below and above it -
-while the rest of the river bends normally. The two builds style the road
-differently: Timex 8x1 paints it as a solid white band, while the standard
-build avoids 8x8 attribute clash entirely - its road cells keep terrain-green
-ink over black paper and the road is outlined by two solid black bitmap edge
-lines drawn only over the land approaches, never across the span.
-
-The first two character rows are a blank black upper margin. The river occupies
-152 scanlines (`Y=16..167`). The final three character rows form a fixed status
-panel: one black separator row, the compact lives/fuel/score row, and the
-copyright footer. Each scroll sample changes only one eighth of the playfield
-scanlines, so the renderer updates:
-
-- 19 scanlines at 1 px per frame,
-- 38 scanlines at 2 px per frame.
-
-On every affected scanline it normally replays only the precomputed bytes whose
-terrain value changed; complex fork transitions fall back to the bounded edge
-renderer. The full 6144-byte bitmap is rendered only during startup and after
-`R`.
-
-## Colour, bridge, and sprites
-
-Normal attribute cells use `0x4c`: BRIGHT 1, green INK, and blue PAPER. A set
-bitmap bit represents land or a visible object; a clear bit represents water.
-The bridge temporarily changes its cells to `0x4a`, producing bright red
-INK over bright blue PAPER. The original Spectrum has no dedicated brown
-colour, so bright red is used to keep the water brightness unchanged.
-
-The bridge is also a bitmap object, so it may begin at any Y position and move
-smoothly by one pixel. Standard Spectrum attributes are tied to an 8×8 grid;
-the bridge colour therefore covers two or three complete cells and advances in
-eight-scanline steps even though the bitmap moves every pixel. The renderer
-updates only an entering or departing attribute row instead of repainting the
-whole rectangle in the standard build. The Timex build uses one attribute row
-per bitmap scanline, so its bridge colour follows the moving bitmap exactly.
-
-In the standard build the road approaches keep the terrain look: their cells
-use `0x44` (terrain-green INK over black PAPER) and the road is drawn as two
-solid black bitmap edge lines across the land only, never over the span. The
-river banks of the whole bridge board are latched to byte boundaries when the
-bridge is scheduled, and the span colour covers exactly the water columns, so
-no attribute cell ever mixes road colour with meandering terrain — the source
-of the former attribute clash at the banks. The Timex build keeps its white
-road, following the bitmap per scanline. The effect does not use the physical
-screen border: the experimental border raster reduced animation to roughly
-25 Hz and has been removed.
-
-The sprite shapes were suggested by screenshots of the Atari 2600 River Raid
-and expanded horizontally by 2×. The public
-[River Raid disassembly](https://gitlab.com/menelkir/atari-2600/-/blob/master/River%20Raid%20%28decomp%29.asm)
-was used as a reference. The tank is a new silhouette drawn under the same
-eight-bit-source and 2× horizontal expansion constraints. Steering selects
-the original Atari `JetMove` swept-wing silhouette and reflects it exactly for
-the opposite direction, as the 2600 did with `REFP0`; releasing the direction
-returns to the level-wing sprite without leaving XOR trails.
-
-The helicopter now uses the actual `Heli0A/B` and `Heli1A/B` data from the
-Atari disassembly. Interleaving the A/B kernel rows produces the ten visible
-scanlines; the two animation frames differ only in their first two rotor rows
-and toggle every second display frame, matching the original logic. Atari used
-the `REFP1` hardware bit to reflect the complete sprite when its patrol changed
-direction. This version precomputes both animation frames in both directions,
-so the helicopter's nose always points along its movement. It uses white INK
-over blue PAPER. The Atari could change an object's colour on each scanline,
-whereas the Spectrum has one colour pair per 8×8 cell; exact black-and-white
-bands would create a visible attribute-clash rectangle.
-
-The current scene contains:
-
-- the player aircraft controlled with `O` / `P`,
-- two 32-pixel-wide ships: one remains fixed on the X axis, while the other
-  patrols by one real pixel every two frames and uses a horizontally reflected
-  cache whenever it travels left, so its bow always faces its movement; the
-  Timex build colours each hull scanline like the Atari `ShipCol` table —
-  black mast and superstructure, red upper hull, cyan waterline — while the
-  standard build keeps the single river ink to avoid an attribute rectangle,
-- an aircraft crossing all 256 screen pixels at 3 px per frame; its Y position
-  scrolls with the course, so it remains on the world line where it appeared;
-  once shot down it stays absent until the scene is restarted,
-- a helicopter whose consecutive appearances alternate between stationary and
-  one-pixel-per-frame patrol modes,
-- a static 16×20 hot-air balloon: it does not patrol or animate, but remains
-  anchored to the course and therefore scrolls down with the river,
-- a destructible vertical 8×32 `F`/`U`/`E`/`L` depot with magenta `F` and `E`
-  and white `U` and `L` backgrounds, which safely refuels the player on contact,
-- a periodic black tank on the left or right bank, firing horizontally over
-  water without resembling a blue hole in the bank,
-- a bridge and full-width road with a tank that either drives from one screen
-  edge, across the approach and bridge, to the opposite edge, or stops before
-  the entrance and fires into the river,
-- periodic river forks.
-
-Houses and trees are deliberately disabled in this version.
-
-At most two of the four water-combat actors (the two ships, helicopter, and
-crossing aircraft) are active simultaneously. A ship or helicopter that leaves
-the screen or is destroyed waits 160 frames before requesting a free slot;
-when both slots are occupied, it keeps waiting instead of being generated and
-silently overloading the renderer. This halves the main enemy-sprite density
-without frame skipping. The static balloon, fuel, tanks, projectiles, and short
-explosion effects are not counted because they have separate gameplay roles
-and appear only periodically.
-
-Both builds use the same bitmap compositor. Ships, helicopters, balloons and
-FUEL occupy guaranteed water; the shore tank occupies full land. Their final
-rows can therefore be stored directly, including transparent zeroes. The
-player, crossing aircraft and bridge tank combine cached masks with a
-materialized terrain row before storing the final bytes, so they do not cut a
-bank edge or the road. A scrolling actor restores only departing top rows
-and any exposed side byte before writing its new shape; it is never blanked as
-a whole between frames. The bridge likewise updates only entering/departing
-rows and moving edge details. XOR is reserved for explosions.
-
-The blitters support arbitrary bit offsets, so 1–3 px movement is not
-implemented as a series of eight-pixel jumps. Eight shifted variants of each
-shape are generated once in RAM during startup, making drawing time independent
-of `X & 7`. Ships and helicopters use
-the bounds of their current branch; during a fork, the island acts as a second
-bank and forces them to turn around. While drawing a few sprite rows, `SP`
-temporarily points at the scanline-address table, and consecutive `POP HL`
-instructions avoid recalculating the Spectrum's interlaced bitmap addresses.
-Recurring ships, the crossing aircraft, helicopters, balloons, FUEL, and shore
-tanks may enter only at the first playfield scanline (`Y=16`). The entrance
-check uses an eighteen-pixel gap for water actors and the full 32-pixel depot
-height for FUEL. If that entrance is occupied, the actor waits off-screen and
-retries later. A bridge conflict likewise removes a water actor and queues a
-fresh top entry instead of teleporting it into a free lane halfway down the
-screen.
-
-Bridge boards are kept as a calm corridor: the heavy movers — the patrolling
-ship, the crossing aircraft, helicopters, and shore tanks — hold while a
-bridge is scheduled within one screenful of arriving, queued, on screen, or
-while its destroyed road is still scrolling through. The static ship, the
-balloon, and FUEL still appear there, and the tank crossing the bridge stays
-the corridor's only heavy actor.
-
-The bridge is not erased in full while scrolling. Each frame restores only the
-1–2 scanlines leaving its top, adds new scanlines at the bottom, and refreshes
-four edge bytes after the river renderer. Its 16-pixel thickness therefore
-does not require two complete passes over the rectangle.
-
-## Collision and gameplay details
-
-Bank collision does not sample the sprite-filled framebuffer. A forgiving 6×6
-core of the player is checked against exact pixel bank bounds, island intervals
-and the intact bridge for each covered world row. This avoids both framebuffer
-ambiguity and deaths caused by transparent wing corners.
-
-A separate forgiving 6×6 player core checks collisions with the 32-pixel
-ships, balloon, helicopter, crossing aircraft, the bridge tank, and the shared
-2×2 tank shell. The ordinary shore tank is not a direct collision target: it
-remains on lethal land, while only its projectile enters navigable water. The
-shell moves horizontally at 4 px per frame while retaining its world line as
-the river scrolls. When fired, it aims toward the player's current centre but
-clamps its destination to a safe water branch. At the destination it becomes a
-two-frame animation of a ball and expanding splash. The flying shell is
-lethal; the splash itself is harmless. The shore tank waits 72 frames before
-its first shot and 96 frames between later shots, making its fire less frequent
-but more dangerous once a shell is in flight.
-
-The 32-column HUD displays `LIVES:n FUEL:###### SCORE:nnnnnn` in its only status
-row. The copyright line remains static throughout active gameplay; it scrolls
-only on the waiting screen between games, so it adds no gameplay copying. Each
-fuel cell represents eight units and the HUD is dirtied only when one of those
-thresholds is crossed. One unit is consumed every 32 frames; while the player overlaps
-`FUEL`, consumption pauses and one unit is restored every five frames. Reaching
-zero causes a crash. Labels are copied only when the screen is created. Later
-updates touch only the changed life digit, fuel cells, or the shortest score
-suffix affected by decimal carry.
-
-`FUEL` is deliberately non-lethal: the player may overlap it to refuel. A
-projectile destroys it, awards 100 points, and starts the normal impact
-explosion; another depot enters later. Its four letters occupy separate 8×8
-cells in one vertical column. As in the Atari `FuelA/FuelB` shape, the bitmap
-contains the solid depot body and cuts the letters out of it. Four stable colour
-bands make the `F` and `E` backgrounds bright magenta and the `U` and `L`
-backgrounds bright white; there is no temporal flashing. Standard Spectrum
-colour is tied to the 8-line attribute grid, so while the bitmap moves every
-pixel, a split colour boundary selects the letter occupying most of that cell.
-A dedicated one-byte blitter draws 32 narrow rows with fewer bitmap writes than
-the former 32×8 horizontal word.
-
-Destroying either ship, the balloon, helicopter, or crossing aircraft awards
-100 points, consumes the projectile, and starts a short three-frame impact
-explosion with an AY burst. Ships and the helicopter return after their
-160-frame delay and only when a combat-sprite slot is free; the balloon uses
-its own lightweight spawn delay, while the crossing aircraft remains destroyed
-for the rest of the current scene. Projectile collision tests the complete
-ten-scanline swept interval, so a six-pixel movement cannot tunnel through an
-eight-line hull. The crossing aircraft is tested explicitly because it may fly
-above land as well as water.
-
-After moving-target tests, the projectile's two solid pixels are checked over
-all ten scanlines of the swept path. They must remain over clear bitmap bits,
-which normally represent blue water. Contact with a bank, island, or road
-consumes the projectile. Contact with the bridge geometry destroys the bridge
-and awards points.
-
-The player starts with two lives. After a collision, a three-frame explosion
-replaces the aircraft while the river and all other objects remain frozen for
-75 frames, or approximately 1.5 seconds at 50 Hz. After the first crash the
-course restarts with one life and the score preserved. The second crash opens a
-separate `GAME OVER` screen. Frozen sprites remain resident during the pause;
-only the old and new 13-row explosion phases are XORed every fifth frame.
-
-The player projectile can destroy a bridge, now with both a visible impact and
-an AY explosion. A bridge alone is worth 200 points. If a crossing tank is
-already on the span, the same shot also removes the tank and awards 500 points
-in total. A crossing tank which has not reached the span survives bridge
-destruction, stops on the remaining road, and only then switches to firing
-behaviour. Ships,
-helicopters, and fuel are kept at
-least eight pixels outside the bridge's vertical band and cannot pass through
-it. The bridge tank is intentionally exempt. The shore and bridge tanks have
-separate actor state and can appear simultaneously; only their projectile slot
-is shared. Every tank on an intact bridge drives across it and never fires. A
-crossing tank starts at pixel X=0 or X=240 and remains active until its hull
-reaches the opposite screen edge; leaving the bridge span no longer removes
-it. At base speed it alternates one- and two-pixel steps, averaging 1.5 px per
-frame instead of the former 2 px. This sideways speed is independent of the
-player's Q/A scroll modifier.
-
-Bridge placement alternates between the naturally reached river width and a
-deliberately narrow section (at most roughly 112 pixels of water), so not every
-crossing is generated over a broad river.
-
-Destroying a bridge clears all 16 affected bitmap scanlines before rebuilding
-the complete banks, island, and river; the normal dirty renderer updates only
-bank edges and therefore cannot reconstruct a row which has been cleared
-completely. The brown centre span becomes blue water, while the road
-approaches remain on both banks and keep scrolling down with the world - as a
-white band on Timex with no further bitmap work, and with their two black
-edge lines maintained per frame on the standard build.
-
-## AY sound
-
-The effects are a port of the original Atari 2600 sound routine: its per-frame
-TIA register behaviour was transcribed from the commented River Raid
-disassembly and converted offline by `tools/tia2ay.py` into the AY frame
-tables in the generated, committed `src/sound_ay_data.asm` (tone frequencies
-convert exactly, noise pitches map order-preservingly into the AY range,
-linear TIA volumes map onto the AY's logarithmic scale, and every sequence is
-resampled from 60 Hz to 50 Hz). Run `make sound-data` after changing the
-converter. The channel layout:
-
-- channel A is the white-noise jet engine; slow, base, and fast movement
-  sample the original's speed-to-frequency formula, and fast flight is louder,
-- channel A also carries the low-fuel warning (below a quarter tank the
-  engine periodically gives way to the original's rising siren tone) and the
-  life-lost noise burst, which uses a longer, higher variant when the tank
-  runs dry,
-- channel B replays the missile's descending frequency sweep; tank fire keeps
-  its own sharper sweep (the shore gun has no Atari counterpart),
-- channel C plays the destroyed-actor burst — white noise whose frequency is
-  re-randomised every frame, giving the original's crackle — plus the tank
-  shell's water splash,
-- refuelling repeats the original's short decaying ping for as long as the
-  aircraft touches the depot, jumping exactly one octave higher once the tank
-  is full.
-
-Engine registers are rewritten only when the requested speed changes. A stock
-48K Spectrum continues to run the same game code silently; use `make run` for a
-128K ZEsarUX configuration or `make run-48` to test that fallback explicitly.
-
-## Performance budget
-
-A 48K 50 Hz frame contains 69,888 T-states. Current ZEsarUX profiling after the
-resident-player and terrain-delta changes observed ordinary early-game frames
-between roughly 32,000 and 54,000 T-states. A longer generated session with
-several actors, bridge, bridge tank and shell sampled approximately
-31,000–60,000 T-states; comparable heavy scenes before these changes reached
-75,000–86,000.
-
-Targeted TC2068 debugger measurements put a one-pixel dirty terrain pass at
-10,564 T-states before its incremental-address rewrite and 8,404 afterwards
-(about 20% less). A forced Timex pass containing FUEL, balloon, helicopter and
-tank fell from 11,179 to 8,680 T-states (about 22% less). The terrain figure was
-captured just before the final rare ring-wrap guard was added, so it documents
-the size of the improvement rather than an exact current-cycle promise. These
-are samples, not a claimed exhaustive worst case; `make profile` and
-`make profile-timex` remain the source of truth for a particular scene.
-
-The main savings are structural. Sprite shifts are generated once at startup;
-water blitters consume a table of Spectrum scanline addresses with `POP HL`;
-terrain rows are materialized once per generated course block; and dirty rows
-replay precomputed `(column,value)` differences. The stationary player no
-longer recomposes all fourteen rows every frame: without steering it repairs
-only the two terrain residues touched at normal speed (four on a two-pixel
-phase). Full player composition is reserved for X/pose changes and bridge-road
-overlap.
-
-The interactive fast mode scrolls a flat 2 px per frame in every scene; there
-is no heavy-scene cap. The profiling border covers input and AY work as well
-as rendering, so Q-specific regressions remain visible.
-
-Every active frame begins with `HALT`, synchronized to the display interrupt.
-Both builds keep ordinary bitmaps resident; Timex then advances its 8×1
-attribute pointers linearly and cleans only attribute rows/columns no longer
-covered by the current object. A busy frame may slow the world without leaving
-silhouettes erased for an entire displayed frame. This is an incremental,
-raster-synchronized renderer, not page flipping or a second screen buffer.
+- [docs/building.md](docs/building.md) — every make target, the emulator
+  configuration, the built-in assembler/toolchain, and the module layout.
+- [docs/timex.md](docs/timex.md) — the Timex 8×1 hi-colour mode and the
+  TC2048/TC2068/TS2068 AY hardware handling, including the optional-AY probe.
+- [docs/renderer.md](docs/renderer.md) — the V3 course model, the incremental
+  renderer, colour/bridge/sprite handling, and the performance budget.
+- [docs/gameplay.md](docs/gameplay.md) — collision rules, HUD, fuel, tanks,
+  bridges, and scoring details.
+- [docs/sound.md](docs/sound.md) — the Atari-derived AY effects and the
+  TIA-to-AY conversion pipeline.
+- [CHANGELOG.md](CHANGELOG.md) — release history.

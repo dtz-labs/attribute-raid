@@ -4,9 +4,19 @@
 
 - `src/main.asm` contains the ZX Spectrum game and renderer.
 - `tools/build.py` implements the project's small Z80 assembler subset and
-  writes the BIN, MAP, BASIC loader, and TAP outputs.
+  writes the BIN, MAP, BASIC loader, and TAP outputs (including the
+  `assets/loading-screen.scr` SCREEN$ block).
 - `Makefile` is the supported build and emulator entry point.
 - `.github/workflows/` builds the TAP on pushes and publishes tagged releases.
+- `README.md` is a deliberately short overview; the technical documentation
+  lives in `docs/`: [docs/building.md](docs/building.md) (make targets,
+  emulator config, toolchain, module layout), [docs/timex.md](docs/timex.md)
+  (Timex 8×1 mode and AY hardware detection),
+  [docs/renderer.md](docs/renderer.md) (course model, incremental renderer,
+  performance budget), [docs/gameplay.md](docs/gameplay.md) (collision, HUD,
+  fuel, bridges, scoring) and [docs/sound.md](docs/sound.md) (Atari-derived
+  AY effects and the TIA→AY converter).
+- `assets/` holds the loading screen (source PNG and converted `.scr`).
 
 ## Build and verification
 
@@ -26,8 +36,9 @@
 - When adding a Z80 instruction form to `src/main.asm`, add matching encoding
   support to `tools/build.py` in the same change.
 - Keep generated files under `build/`; do not commit build artifacts.
-- Update `README.md` when controls, build commands, gameplay, or renderer
-  behavior changes.
+- Update the documentation when controls, build commands, gameplay, or
+  renderer behavior changes: player-facing basics belong in the short
+  `README.md`, technical detail in the matching `docs/*.md` page.
 
 ## Profiling and emulator inspection tools
 
