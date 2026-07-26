@@ -722,19 +722,44 @@ def basic_line(number: int, body: bytes) -> bytes:
     return number.to_bytes(2, "big") + len(content).to_bytes(2, "little") + content
 
 
-def basic_loader(start: int) -> bytes:
+def basic_loader(start: int, has_screen: bool) -> bytes:
     program = bytearray()
-    program.extend(basic_line(10, b"\xfd" + zx_number(start - 1)))
-    program.extend(basic_line(20, b'\xef""\xaf'))
-    program.extend(basic_line(30, b"\xf9\xc0" + zx_number(start)))
+    if has_screen:
+        # BORDER 0: PAPER 0: INK 7: CLEAR start-1, then LOAD ""SCREEN$ so the
+        # title picture is visible while the long code block loads. The ROM
+        # still prints "Bytes:" over the top-left corner; white-on-black keeps
+        # that unobtrusive and the game clears the screen at startup anyway.
+        program.extend(
+            basic_line(
+                10,
+                b"\xe7"
+                + zx_number(0)
+                + b":\xda"
+                + zx_number(0)
+                + b":\xd9"
+                + zx_number(7)
+                + b":\xfd"
+                + zx_number(start - 1),
+            )
+        )
+        program.extend(basic_line(20, b'\xef""\xaa'))
+        program.extend(basic_line(30, b'\xef""\xaf'))
+        program.extend(basic_line(40, b"\xf9\xc0" + zx_number(start)))
+    else:
+        program.extend(basic_line(10, b"\xfd" + zx_number(start - 1)))
+        program.extend(basic_line(20, b'\xef""\xaf'))
+        program.extend(basic_line(30, b"\xf9\xc0" + zx_number(start)))
     return bytes(program)
 
 
-def write_tap(path: Path, code: bytes, start: int) -> None:
-    loader = basic_loader(start)
+def write_tap(path: Path, code: bytes, start: int, screen: bytes | None = None) -> None:
+    loader = basic_loader(start, screen is not None)
     tap = bytearray()
     tap.extend(tap_block(0x00, zx_header(0, "ATTR-RAID", len(loader), 10, len(loader))))
     tap.extend(tap_block(0xFF, loader))
+    if screen is not None:
+        tap.extend(tap_block(0x00, zx_header(3, "RAIDSCR", len(screen), 0x4000, 0x8000)))
+        tap.extend(tap_block(0xFF, screen))
     tap.extend(tap_block(0x00, zx_header(3, "RAIDCODE", len(code), start, start)))
     tap.extend(tap_block(0xFF, code))
     path.write_bytes(tap)
@@ -756,6 +781,12 @@ def main() -> int:
         "--basename",
         default="attribute-raid",
         help="base name for generated BIN, TAP and MAP files",
+    )
+    parser.add_argument(
+        "--loadscr",
+        type=Path,
+        default=None,
+        help="6912-byte .scr shown as a SCREEN$ block while the code loads",
     )
     args = parser.parse_args()
 
@@ -790,8 +821,14 @@ def main() -> int:
     tap_path = args.outdir / f"{args.basename}.tap"
     map_path = args.outdir / f"{args.basename}.map"
 
+    screen = None
+    if args.loadscr is not None:
+        screen = args.loadscr.read_bytes()
+        if len(screen) != 6912:
+            parser.error(f"{args.loadscr}: expected 6912 bytes, got {len(screen)}")
+
     bin_path.write_bytes(code)
-    write_tap(tap_path, code, origin)
+    write_tap(tap_path, code, origin, screen)
 
     with map_path.open("w", encoding="ascii") as fh:
         for name, value in sorted(labels.items(), key=lambda item: item[1]):

@@ -6,6 +6,7 @@ OUTDIR := build
 TAP := $(OUTDIR)/attribute-raid.tap
 TIMEX_TAP := $(OUTDIR)/attribute-raid-timex.tap
 ASM_SOURCES := $(wildcard src/*.asm)
+LOADSCR := assets/loading-screen.scr
 DEFINES ?=
 ZESARUX ?= /Applications/ZEsarUX.app/Contents/MacOS/zesarux
 ZESARUX_CONFIG ?= $(abspath tools/zesarux.rc)
@@ -29,11 +30,11 @@ standard: $(TAP)
 
 timex: $(TIMEX_TAP)
 
-$(TAP): $(ASM_SOURCES) tools/build.py | $(OUTDIR)
-	python3 tools/build.py $(DEFINES) src/main.asm $(OUTDIR)
+$(TAP): $(ASM_SOURCES) tools/build.py $(LOADSCR) | $(OUTDIR)
+	python3 tools/build.py $(DEFINES) --loadscr $(LOADSCR) src/main.asm $(OUTDIR)
 
-$(TIMEX_TAP): $(ASM_SOURCES) tools/build.py | $(OUTDIR)
-	python3 tools/build.py $(DEFINES) -D TIMEX_HICOLOR=1 \
+$(TIMEX_TAP): $(ASM_SOURCES) tools/build.py $(LOADSCR) | $(OUTDIR)
+	python3 tools/build.py $(DEFINES) -D TIMEX_HICOLOR=1 --loadscr $(LOADSCR) \
 		--basename attribute-raid-timex src/main.asm $(OUTDIR)
 
 $(OUTDIR):
