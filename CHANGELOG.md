@@ -41,6 +41,13 @@ both TAPs to every tagged release.
 - Bridges align to the attribute grid, land on flush banks, and their boards
   spawn no conflicting actors.
 
+### Fixed
+
+- The player aircraft now draws over the FUEL depot while refuelling: the
+  depot joined the world-background model, so the plane composes on top of
+  it (and sprites restored over the depot keep its body) instead of the
+  scrolling depot column overwriting the plane.
+
 ### Performance
 
 - The steering compositor is faster, unchanged dirty rows are nearly free,

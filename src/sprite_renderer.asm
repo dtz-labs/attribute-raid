@@ -1084,6 +1084,37 @@ finish_player_transition_direct:
     jp c,draw_current_player_direct
 player_bridge_band_clear:
 
+    ; The depot redraws its scrolling column after the player transition, so
+    ; while the two rectangles overlap the player must be composed again as
+    ; the last writer: the aircraft covers FUEL, not the other way round.
+    ld a,(fuel_active)
+    or a
+    jr z,player_fuel_band_clear
+    ld a,(player_y)
+    add a,14
+    ld b,a                           ; player bottom exclusive
+    ld a,(fuel_y)
+    cp b
+    jr nc,player_fuel_band_clear     ; depot fully below the player
+    add a,32                         ; depot bottom exclusive
+    ld b,a
+    ld a,(player_y)
+    cp b
+    jr nc,player_fuel_band_clear     ; depot fully above the player
+    ld a,(player_x)
+    srl a
+    srl a
+    srl a
+    ld b,a
+    ld a,(fuel_x)
+    srl a
+    srl a
+    srl a
+    sub b                            ; depot column within the player triplet?
+    cp 3
+    jp c,draw_current_player_direct
+player_fuel_band_clear:
+
     ld a,(speed_pixels)
     or a
     ret z
@@ -2192,6 +2223,43 @@ uniform_rect_empty:
     ret
 
 get_world_background_byte:
+    ; Input A=Y, C=bitmap byte column. Terrain plus the FUEL depot overlay:
+    ; the depot belongs to the background model, so sprites composed or
+    ; restored over its column keep the depot body instead of punching
+    ; water-coloured holes into it. The player therefore covers FUEL.
+    call get_world_terrain_byte
+    ld e,a
+    ld a,(fuel_active)
+    or a
+    jr z,world_background_overlay_done
+    ld a,(fuel_x)
+    srl a
+    srl a
+    srl a
+    ld b,a
+    ld a,(background_query_col)
+    cp b
+    jr nz,world_background_overlay_done
+    ld a,(fuel_y)
+    ld b,a
+    ld a,(background_query_y)
+    sub b
+    cp 32
+    jr nc,world_background_overlay_done
+    ld hl,fuel_vertical_sprite
+    add a,l
+    ld l,a
+    jr nc,world_background_overlay_row
+    inc h
+world_background_overlay_row:
+    ld a,(hl)
+    or e
+    ret
+world_background_overlay_done:
+    ld a,e
+    ret
+
+get_world_terrain_byte:
     ; Input A=Y, C=bitmap byte column. Return the world bitmap byte without any
     ; sprites. This pure query lets crossing actors be written directly over
     ; water, banks or the bridge instead of toggling the visible framebuffer.
@@ -2338,6 +2406,48 @@ resolve_block_recompute:
     ret
 
 load_world_background_triplet:
+    ; Input A=Y, C=first byte column; preserves DE. Terrain triplet plus the
+    ; FUEL depot overlay (same layering as get_world_background_byte).
+    call load_world_terrain_triplet
+    ld a,(fuel_active)
+    or a
+    ret z
+    ld a,(background_query_col)
+    ld b,a
+    ld a,(fuel_x)
+    srl a
+    srl a
+    srl a
+    sub b                            ; depot column relative to the triplet
+    cp 3
+    ret nc
+    ld c,a
+    ld a,(fuel_y)
+    ld b,a
+    ld a,(background_query_y)
+    sub b
+    cp 32
+    ret nc
+    ld hl,fuel_vertical_sprite
+    add a,l
+    ld l,a
+    jr nc,triplet_overlay_row_ready
+    inc h
+triplet_overlay_row_ready:
+    ld b,(hl)                        ; depot row byte
+    ld hl,world_background_byte_0
+    ld a,c
+    add a,l
+    ld l,a                           ; the three triplet slots are consecutive
+    jr nc,triplet_overlay_slot_ready
+    inc h
+triplet_overlay_slot_ready:
+    ld a,(hl)
+    or b
+    ld (hl),a
+    ret
+
+load_world_terrain_triplet:
     ; Input A=Y, C=first byte column. Materialize three adjacent background
     ; bytes for the mixed-terrain sprite writers. One bridge test and one
     ; block lookup replace three complete get_world_background_byte calls.
