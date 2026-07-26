@@ -284,8 +284,8 @@ course_right_x_ready:
 rebuild_block_bitmap_row:
     ; Materialize the complete 32-byte world row for the newly generated
     ; course block. Its geometry is five contiguous runs, so emit those runs
-    ; directly instead of asking get_course_background_byte_indexed thirty-two
-    ; times. Runtime mixed-terrain sprite composition still sees the identical
+    ; directly instead of classifying each of the thirty-two columns on its
+    ; own. Runtime mixed-terrain sprite composition still sees the identical
     ; materialized row.
     ld a,(course_block_head)
     ld (block_bitmap_build_index),a
@@ -433,45 +433,6 @@ store_block_delta_mirror:
     add a,32
     ld l,a
     djnz store_block_delta_mirror
-    ret
-
-get_course_background_byte_indexed:
-    ; Input A=byte column, L=course block index. Output A=world byte.
-    ld b,a
-    ld h,HIGH(block_left_col)
-    cp (hl)
-    jr c,indexed_background_land
-    jr nz,indexed_background_check_right
-    ld h,HIGH(block_left_mask)
-    ld a,(hl)
-    ret
-indexed_background_check_right:
-    ld a,b
-    ld h,HIGH(block_right_col)
-    cp (hl)
-    jr c,indexed_background_check_island
-    jr nz,indexed_background_land
-    ld h,HIGH(block_right_mask)
-    ld a,(hl)
-    ret
-indexed_background_check_island:
-    ld h,HIGH(block_island_left)
-    ld a,(hl)
-    cp 255
-    jr z,indexed_background_water
-    ld c,a
-    ld a,b
-    cp c
-    jr c,indexed_background_water
-    ld h,HIGH(block_island_right)
-    cp (hl)
-    jr c,indexed_background_land
-    jr z,indexed_background_land
-indexed_background_water:
-    xor a
-    ret
-indexed_background_land:
-    ld a,255
     ret
 
 block_bitmap_address:
@@ -1247,13 +1208,6 @@ get_bounds_for_y:
     ld d,(hl)
     ld h,HIGH(block_right_col)
     ld e,(hl)
-    ret
-
-calc_river_center_col:
-    call get_bounds_for_y
-    ld a,d
-    add a,e
-    srl a
     ret
 
 get_pixel_lane_bounds:

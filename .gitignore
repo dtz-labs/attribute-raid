@@ -5,3 +5,4 @@ build-profile-timex/
 build-bench/
 __pycache__/
 build-bench-std/
+.claude/worktrees/
