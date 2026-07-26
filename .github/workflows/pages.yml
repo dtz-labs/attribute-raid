@@ -15,6 +15,10 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true
 
+env:
+  # bump to move to a newer emulator build
+  JSSPECCY_RELEASE: v3.2.0-timex.1
+
 jobs:
   deploy:
     name: deploy browser player
@@ -25,15 +29,45 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Build the standard TAP
-        run: make standard
+      - name: Build both TAPs
+        run: make standard timex
+
+      # The emulator is no longer vendored in this repository. JSSpeccy 3 has
+      # no Timex machines, so the hi-colour build had nowhere to run in a
+      # browser; this pulls a tagged build of the fork that adds them.
+      - name: Fetch the emulator build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p _emulator
+          gh release download "$JSSPECCY_RELEASE" \
+            --repo dtz-labs/jsspeccy3 \
+            --pattern jsspeccy-dist.zip \
+            --output _emulator/jsspeccy-dist.zip
+          unzip -q _emulator/jsspeccy-dist.zip -d _emulator/dist
 
       - name: Assemble the site
         run: |
           set -eu
           mkdir -p _site
           cp -R site/. _site/
+          cp -R _emulator/dist/jsspeccy _site/jsspeccy
           cp build/attribute-raid.tap _site/attribute-raid.tap
+          cp build/attribute-raid-timex.tap _site/attribute-raid-timex.tap
+
+      - name: Check the pieces the page needs are all there
+        run: |
+          set -eu
+          test -f _site/index.html
+          test -f _site/attribute-raid.tap
+          test -f _site/attribute-raid-timex.tap
+          test -f _site/jsspeccy/jsspeccy.js
+          test -f _site/jsspeccy/jsspeccy-core.wasm
+          test -f _site/jsspeccy/roms/tc2048.rom
+          test -f _site/jsspeccy/roms/2068-home.rom
+          test -f _site/jsspeccy/tapeloaders/tape_2048.szx
+          test -f _site/jsspeccy/tapeloaders/tape_2068.szx
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
