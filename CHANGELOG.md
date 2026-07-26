@@ -7,7 +7,11 @@ both TAPs to every tagged release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Play-in-browser page: every push to `main` deploys the current 128K TAP to
+  GitHub Pages, embedded in the vendored JSSpeccy 3 emulator
+  (`site/`, `.github/workflows/pages.yml`), linked from the README.
 
 ## [0.3.0] - 2026-07-26
 

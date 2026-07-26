@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attribute Raid — play in the browser</title>
+<style>
+  body {
+    background: #101010;
+    color: #d8d8d8;
+    font-family: "Courier New", monospace;
+    margin: 0;
+    padding: 1.5rem 1rem 3rem;
+    text-align: center;
+  }
+  h1 { color: #ffff55; font-size: 1.5rem; margin: 0 0 0.25rem; }
+  p  { margin: 0.4rem auto; max-width: 42rem; line-height: 1.45; }
+  a  { color: #55ffff; }
+  #jsspeccy { margin: 1.25rem auto; }
+  .keys { color: #55ff55; }
+  .footer { margin-top: 1.5rem; font-size: 0.85rem; color: #909090; }
+</style>
+</head>
+<body>
+<h1>ATTRIBUTE RAID</h1>
+<p>A River Raid-style game for the ZX Spectrum. This page always runs the
+latest TAP built from <a href="https://github.com/dtz-labs/attribute-raid">main</a>
+on an emulated Spectrum 128K, so the AY sound effects ported from the
+Atari&nbsp;2600 original are audible. Click the display to give it the
+keyboard (and to let the browser start audio).</p>
+<p class="keys">O/P — steer &nbsp; Q — fast &nbsp; A — slow &nbsp;
+SPACE — fire &nbsp; R — new game</p>
+<div id="jsspeccy"></div>
+<p>The dedicated Timex TC2048/TC2068/TS2068 hi-colour build is not playable
+here (JSSpeccy has no Timex video modes) — grab it from the
+<a href="https://github.com/dtz-labs/attribute-raid/releases">releases</a>.</p>
+<p class="footer">Emulation by
+<a href="https://github.com/gasman/jsspeccy3">JSSpeccy&nbsp;3</a> (GPL-3).</p>
+<script src="jsspeccy/jsspeccy.js"></script>
+<script>
+JSSpeccy(document.getElementById('jsspeccy'), {
+    machine: '128',
+    openUrl: 'attribute-raid.tap',
+    autoLoadTapes: true,
+    autoStart: true,
+    zoom: 2
+});
+</script>
+</body>
+</html>

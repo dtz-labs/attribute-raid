@@ -14,7 +14,13 @@ Jentzsch's commented disassembly of River Raid (Activision, 1982), archived at
 (originally `bjars.com/source/RiverRaid.asm`). Only derived register values
 and shapes are reproduced here, no original code.
 
-![Loading screen](assets/loading-screen.png)
+[![Loading screen](assets/loading-screen.png)](https://dtz-labs.github.io/attribute-raid/)
+
+**[▶ Play the latest build in your browser](https://dtz-labs.github.io/attribute-raid/)** —
+every push deploys the current Spectrum 128K TAP to GitHub Pages, where it runs
+in the embedded [JSSpeccy 3](https://github.com/gasman/jsspeccy3) emulator with
+AY sound. (The Timex hi-colour build is not playable there; use the
+[releases](https://github.com/dtz-labs/attribute-raid/releases).)
 
 The loading screen above (`assets/loading-screen.png`) ships in both TAPs as a
 `SCREEN$` block, converted to the Spectrum's 6912-byte format in
