@@ -2647,7 +2647,27 @@ fill_world_background_row:
     jr c,fill_world_row_fast
     sub b
     cp 16
-    jr c,fill_world_row_slow
+    jr nc,fill_world_row_fast
+#if not TIMEX_HICOLOR
+    ; An intact span owns all sixteen rows, but a destroyed road differs from
+    ; plain terrain on only two of them: the black edge lines at band rows 1
+    ; and 14. Sending the other fourteen through the per-byte query engine kept
+    ; the renderer on its slow path for as long as the band needed to scroll
+    ; off - up to 76 frames - which measured as a sustained half-rate stretch
+    ; after every bridge destroyed near the top of the playfield.
+    ld b,a                           ; row within the band
+    ld a,(bridge_active)
+    or a
+    jr nz,fill_world_row_slow
+    ld a,b
+    cp 1
+    jr z,fill_world_row_slow
+    cp 14
+    jr z,fill_world_row_slow
+    jr fill_world_row_fast
+#else
+    jr fill_world_row_slow
+#endif
 fill_world_row_fast:
     ld a,(transition_fill_y)
     ld (background_query_y),a
