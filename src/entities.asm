@@ -1181,7 +1181,13 @@ move_tank_shell_left:
     ret
 
 land_tank_shell:
+    ; tank_shell_target_x is a centre: it is clamped against the lane exactly
+    ; like the jet's own centre. tank_shell_x is a left edge for every consumer,
+    ; the splash draw and its cleanup rect included, so convert once here.
+    ; Without this the 16-pixel splash sat eight pixels right of its landing
+    ; point and its second byte covered the right bank edge.
     ld a,(tank_shell_target_x)
+    sub 8
     ld (tank_shell_x),a
     call start_ay_splash
     ld a,10
