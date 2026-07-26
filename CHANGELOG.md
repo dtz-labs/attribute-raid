@@ -26,6 +26,18 @@ both TAPs to every tagged release.
 - The tank splash lands on its target instead of eight pixels to the right of
   it. Its aim point is a centre but was consumed as a left edge, which put the
   sprite's second byte on the right bank edge column.
+- Ships and the helicopter no longer spawn partly on land. All three asked for
+  a safe position using a scanline above the playfield, because raising their
+  active flag overwrote the row they meant to sample; ten percent of ship
+  spawns were affected.
+
+### Changed
+
+- Destroying a bridge no longer slows the game down until the wreck scrolls
+  away. The destroyed road kept every row of its sixteen-row band on the
+  renderer's per-byte path for as long as the band stayed on screen, which cost
+  every sprite that touched it. Only the two rows carrying the road's edge lines
+  need that path now.
 
 ## [0.3.0] - 2026-07-26
 
