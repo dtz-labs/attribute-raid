@@ -31,14 +31,6 @@ both TAPs to every tagged release.
   active flag overwrote the row they meant to sample; ten percent of ship
   spawns were affected.
 
-### Changed
-
-- Destroying a bridge no longer slows the game down until the wreck scrolls
-  away. The destroyed road kept every row of its sixteen-row band on the
-  renderer's per-byte path for as long as the band stayed on screen, which cost
-  every sprite that touched it. Only the two rows carrying the road's edge lines
-  need that path now.
-
 ## [0.3.0] - 2026-07-26
 
 ### Added

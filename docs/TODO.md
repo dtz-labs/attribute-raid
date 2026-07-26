@@ -107,14 +107,20 @@ Measurement caveats, learned the hard way:
    (`src/course_renderer.asm:935`) so the destroy path can drop
    `render_full_world_row` (`src/entities.asm:1966-1972`).
 
-   Note before starting: measuring this is what exposed the destroyed-road slow
-   path (now fixed), and that was the dominant cost, not this frame. Staging
-   addresses one or two frames out of the ~76 the band lives for. It also needs
-   care that the earlier plan missed: while the rebuild is half finished the
-   band is half destroyed, but the world model carries a single `bridge_active`
-   bit for all sixteen rows, so the model has to be split by row against the
-   restore cursor or sprites compositing over the finished rows will stamp road
-   back onto them.
+   Two notes before starting. Playtesting puts the stutter at the explosion
+   itself rather than spread over the second that follows, which points here and
+   not at anything the destroyed band does later - the one attempt at the latter
+   is in the rejected list below. And the model does NOT have to be split by
+   row: flip `bridge_active`/`destroyed_road_active` atomically as the code
+   already does and stage only the bitmap rebuild. For a frame or two the screen
+   then shows road the model calls water, which corrupts nothing, because
+   nothing else repaints those rows and the explosion covers them.
+
+   The planned shape is a visual one, agreed with the author: the span crumbles
+   outward from the column the shot hit, over roughly six to eight frames, which
+   is how long the band stays on screen at fast scroll. Purely cosmetic - the
+   whole span stops being lethal the moment it is hit, exactly as now - so no
+   per-column collision or world-model state is needed.
 
 3. **Hoist DI/EI + SP save out of the blitters to frame level.** Nine SP-driven
    blitters each pay their own `di` / `ld (sprite_saved_sp),sp` ... restore / `ei`
@@ -217,16 +223,31 @@ Measurement caveats, learned the hard way:
   invites the opposite conclusion.
 - **`prepare_transition_old_projectile_x`** masked twice and branched on a case
   that could never differ; the branch was dead, not merely ugly.
-- **A destroyed road kept the renderer on its slow path.** `destroyed_road_active`
-  lives until the band scrolls off the playfield - up to 76 frames - and
-  `fill_world_background_rect` sent all sixteen band rows through the per-byte
-  query engine for that whole time, so every sprite cleanup touching the band
-  paid it. Measured as a sustained half-rate stretch (43 % of frame boundaries
-  with no idle halt, alongside 56 % idle overall). Only band rows 1 and 14 carry
-  the black edge lines, so the other fourteen now take the fast block-bitmap
-  copy. This, not the destroy frame itself, was the bridge cost.
+- **The spawn row for ships and the helicopter.** All three raised their active
+  flag through A and then called `calc_safe_river_x[_wide]`, which takes Y in A,
+  so they placed themselves using a scanline above the playfield. Spawn-on-land
+  fell from 4.6 % to 0.8 % of spawns; what remains is the vertical-extent cause
+  in correctness item 1.
 
 ## Considered and rejected (do not revisit without new evidence)
+
+- **Taking the destroyed road off the renderer's slow path.** Written, measured,
+  reverted. `destroyed_road_active` does keep all sixteen band rows on the
+  per-byte query engine until the band scrolls off, but routing the fourteen
+  rows that carry no edge line to the fast copy moved the motivating window from
+  43.2 % to 42.0 % overrun frames - nothing. The band-slow family is at most
+  1.16 % of executed instructions in any window measured, and
+  `fill_world_background_byte_loop` alone is 0.30 %; a three-per-mille cost
+  cannot produce a 43 % overrun rate. The error was treating those symbols as
+  the cause because they appeared only in the bad window, without checking their
+  magnitude - check the magnitude. Structurally there is nothing to win either:
+  `fill_world_background_rect` runs only from sprite cleanup, the bridge
+  corridor bans most spawns, and `finish_player_transition_direct` already
+  switches the player to a full opaque redraw when it overlaps the band, so a
+  destroyed road usually sees no cleanup on it at all. The attempt also broke
+  the FUEL depot: the fast path copies terrain without the depot overlay that
+  `get_world_background_byte` applies, costing whole bytes on band row 0 in 41
+  of 200 frames against 0 of 200 with the hunk reverted.
 
 - **Trimming `PLAYFIELD_BOTTOM` 168->160.** Proposed by three reviews as a
   ~500 T/frame saving; after the dirty-row rewrite an unchanged row is nearly
