@@ -67,9 +67,12 @@ generate_next_block:
     ret
 
 generate_block:
-    ; A scheduled bridge spawns two blocks late and lands on a block
-    ; boundary, so the whole 16-line board covers exactly the two blocks
-    ; generated after the decision - both on the latched flat banks.
+    ; A scheduled bridge spawns three blocks late and lands on a block
+    ; boundary: the 16-line board covers the second and third flat blocks,
+    ; and the flat block generated at the decision sits directly BELOW the
+    ; band. The road's 8x8 attribute cells straddle up to seven scanlines
+    ; past either band edge while scrolling, and every straddled row must
+    ; be latched-flat terrain or the cells colour meandering water.
     ld a,(bridge_spawn_next)
     or a
     jr z,generate_block_no_handoff
@@ -591,7 +594,7 @@ generate_bridge_now:
     ld a,(bridge_width_mode)
     xor 1
     ld (bridge_width_mode),a
-    ld a,2
+    ld a,3
     ld (bridge_spawn_next),a
     ; Latch both edges snapped outward to byte boundaries. Every block of
     ; the flat zone reuses these exact values, so the road always meets a

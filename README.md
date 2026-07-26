@@ -179,13 +179,16 @@ updates only an entering or departing attribute row instead of repainting the
 whole rectangle in the standard build. The Timex build uses one attribute row
 per bitmap scanline, so its bridge colour follows the moving bitmap exactly.
 
-Road cells on the banks use bright white INK over green PAPER, while the part
-above the river retains the red/brown bridge colour. Two central scanlines
-contain alternating eight-pixel green gaps. This keeps both the road and bank
-colours meaningful in a shared Spectrum attribute cell. Only the 1–2 centre
-lines entering or leaving the road are changed during scrolling. The effect
-does not use the physical screen border: the experimental border raster
-reduced animation to roughly 25 Hz and has been removed.
+In the standard build the road approaches keep the terrain look: their cells
+use `0x44` (terrain-green INK over black PAPER) and the road is drawn as two
+solid black bitmap edge lines across the land only, never over the span. The
+river banks of the whole bridge board are latched to byte boundaries when the
+bridge is scheduled, and the span colour covers exactly the water columns, so
+no attribute cell ever mixes road colour with meandering terrain — the source
+of the former attribute clash at the banks. The Timex build keeps its white
+road, following the bitmap per scanline. The effect does not use the physical
+screen border: the experimental border raster reduced animation to roughly
+25 Hz and has been removed.
 
 The sprite shapes were suggested by screenshots of the Atari 2600 River Raid
 and expanded horizontally by 2×. The public
@@ -268,6 +271,12 @@ height for FUEL. If that entrance is occupied, the actor waits off-screen and
 retries later. A bridge conflict likewise removes a water actor and queues a
 fresh top entry instead of teleporting it into a free lane halfway down the
 screen.
+
+Bridge boards are kept as a calm corridor: every recurring spawn — patrol
+ships, the crossing aircraft, helicopters, balloons, FUEL, and shore tanks —
+is held while a bridge is scheduled within one screenful of arriving, queued,
+on screen, or while its destroyed road is still scrolling through. The tank
+crossing the bridge is the corridor's only actor.
 
 The bridge is not erased in full while scrolling. Each frame restores only the
 1–2 scanlines leaving its top, adds new scanlines at the bottom, and refreshes

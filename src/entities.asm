@@ -106,6 +106,9 @@ wait_for_ship0:
     ld (ship0_delay),a
     ret
 try_spawn_ship0:
+    call bridge_scene_active
+    or a
+    jr nz,defer_ship0_spawn
     call can_spawn_water_enemy
     or a
     jr nz,spawn_ship0
@@ -151,6 +154,9 @@ wait_for_ship1:
     ld (ship1_delay),a
     ret
 try_spawn_ship1:
+    call bridge_scene_active
+    or a
+    jr nz,defer_ship1_spawn
     call can_spawn_water_enemy
     or a
     jr nz,spawn_ship1
@@ -537,6 +543,9 @@ wait_for_helicopter:
     ld (helicopter_delay),a
     ret
 try_spawn_helicopter:
+    call bridge_scene_active
+    or a
+    jr nz,defer_helicopter_spawn
     call can_spawn_water_enemy
     or a
     jr nz,spawn_helicopter
@@ -648,6 +657,9 @@ wait_for_balloon:
     ld (balloon_delay),a
     ret
 try_spawn_balloon:
+    call bridge_scene_active
+    or a
+    jr nz,defer_balloon_spawn
     ld a,16
     call choose_clear_water_actor_y
     cp 16
@@ -713,12 +725,16 @@ update_fuel_waiting:
     ld (fuel_delay),a
     jp consume_fuel
 spawn_fuel:
+    call bridge_scene_active
+    or a
+    jr nz,defer_fuel_spawn
     ld a,16
     call choose_clear_fuel_y
     cp 16
     jr z,spawn_fuel_at_top
     ; A crowded entrance used to move the depot to an arbitrary on-screen Y.
     ; Wait instead, so FUEL always arrives from the top of the playfield.
+defer_fuel_spawn:
     ld a,16
     ld (fuel_delay),a
     jp consume_fuel
@@ -989,14 +1005,32 @@ defer_tank_spawn:
 
 bridge_scene_active:
     ; A=nonzero while a bridge occupies or is queued for the scene: an intact
-    ; or pending span, or the destroyed road still scrolling through.
+    ; or pending span, the destroyed road still scrolling through, or a
+    ; scheduled bridge within one screenful of arriving. The look-ahead keeps
+    ; every gated spawn off boards the bridge will share: an actor entering at
+    ; Y=16 needs 19 blocks to scroll off, and the span appears three blocks
+    ; after the decision, so anything spawned 16 or fewer blocks before the
+    ; decision would still be on screen with the road.
     ld a,(bridge_spawn_pending)
+    ld b,a
+    ld a,(bridge_spawn_next)        ; covers the decision-to-handoff blocks,
+    or b                            ; when next_feature is already consumed
     ld b,a
     ld a,(bridge_active)
     or b
     ld b,a
     ld a,(destroyed_road_active)
     or b
+    ret nz
+    ld a,(next_feature)
+    or a
+    ret z                           ; next feature is a fork, not a bridge
+    ld a,(feature_countdown)
+    or a
+    ret z                           ; countdown idles at zero during a fork
+    cp 17
+    ret c                           ; 1..16 blocks before the decision: hold
+    xor a
     ret
 
 maybe_fire_bridge_tank:
@@ -1213,6 +1247,9 @@ update_bridge:
     ld (destroyed_road_active),a
     ; Anchor the band on the block boundary: the newest block occupies rows
     ; 0..phase, so the two latched flat blocks begin at exactly phase+1.
+    ; On the latched byte-aligned banks block_right_col is the first LAND
+    ; column, so the span is exactly the E-D water columns and never colours
+    ; a bank cell.
     ld a,(course_phase)
     inc a
     ld (bridge_y),a
@@ -1222,7 +1259,6 @@ update_bridge:
     ld b,a
     ld a,e
     sub b
-    inc a
     ld (bridge_width),a
     call setup_bridge_tank
     ld b,16

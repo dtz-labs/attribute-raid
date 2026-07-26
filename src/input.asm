@@ -22,6 +22,11 @@ autopilot_steer_ready:
     ld a,2
     ld (requested_speed),a
     ld (speed_pixels),a
+#if AUTOPILOT_NOFIRE
+    ; Screenshot benches keep the plane silent so an intact bridge survives
+    ; long enough to be frozen and inspected.
+    ret
+#endif
     ld a,(bullet_active)
     or a
     ret nz

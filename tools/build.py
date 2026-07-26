@@ -761,6 +761,7 @@ def main() -> int:
         "PROFILE_BORDER": 0,
         "TIMEX_HICOLOR": 0,
         "AUTOPILOT": 0,
+        "AUTOPILOT_NOFIRE": 0,
         "PLAYFIELD_BOTTOM": 168,
     }
     for item in args.define:
