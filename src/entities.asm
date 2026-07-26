@@ -1311,7 +1311,11 @@ store_bridge_y:
     ld a,0x4a                       ; intact bridge keeps BRIGHT blue paper
     ld (bridge_center_attr),a
     call bridge_update_attributes
+#if not TIMEX_HICOLOR
+    jp update_standard_road_lines
+#else
     ret
+#endif
 
 update_destroyed_road:
     ; After the span is blown away, both white approaches remain part of the
@@ -1332,12 +1336,86 @@ update_destroyed_road:
     ld a,0x4c                       ; fixed BRIGHT-blue water after destruction
     ld (bridge_center_attr),a
     call bridge_update_attributes
+#if not TIMEX_HICOLOR
+    call update_standard_road_lines
+#endif
     ld a,(bridge_y)
     cp PLAYFIELD_BOTTOM
     ret c
     xor a
     ld (destroyed_road_active),a
     ret
+
+#if not TIMEX_HICOLOR
+; ---------------------------------------------------------------------------
+; Standard-build road lines. The road keeps terrain-green ink over black
+; paper, so its look comes from the bitmap: solid black edge lines at band
+; rows 1 and 14, over the land approaches only - the span and the destroyed
+; span's water are never touched.
+; ---------------------------------------------------------------------------
+update_standard_road_lines:
+    ; Repaint both edge rows at their new positions each frame and restore
+    ; the rows they vacated. A vacated row inside the band becomes solid
+    ; road; one that left through the top is plain approach land, so the
+    ; same 0xff fill is correct for both.
+    ld a,(speed_pixels)
+    or a
+    ret z
+    ld a,1
+    call restore_standard_road_line
+    ld a,14
+    call restore_standard_road_line
+    ld a,1
+    call draw_standard_road_edge
+    ld a,14
+    jp draw_standard_road_edge
+
+restore_standard_road_line:
+    ld c,a
+    ld a,(speed_pixels)
+    ld b,a
+    ld a,(bridge_y)
+    add a,c
+    sub b                           ; previous screen row of this band row
+    ld c,255
+    jr standard_road_line_row
+draw_standard_road_edge:
+    ld c,a
+    ld a,(bridge_y)
+    add a,c
+    ld c,0
+standard_road_line_row:
+    ; A=screen row, C=value: 255 restores solid land, 0 draws the line.
+    cp 16
+    ret c
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    call calc_screen_line_addr
+    ld a,(bridge_col)
+    or a
+    jr z,standard_road_line_right
+    ld b,a
+    call standard_road_line_segment
+standard_road_line_right:
+    ld a,(bridge_width)
+    add a,l
+    ld l,a
+    ld a,(bridge_col)
+    ld b,a
+    ld a,(bridge_width)
+    add a,b
+    ld b,a
+    ld a,32
+    sub b
+    ret z
+    ld b,a
+standard_road_line_segment:
+    ; HL=screen ptr, B=byte count, C=value.
+    ld (hl),c
+    inc l
+    djnz standard_road_line_segment
+    ret
+#endif
 
 bridge_fill_full_bitmap_row:
     ; Input A=Y, C=byte. Road rows are inside a bridge band, so land plus

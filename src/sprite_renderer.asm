@@ -981,6 +981,7 @@ draw_current_bridge_tank_table_ready:
     ld c,a
     ld a,(bridge_tank_y)
     ld b,10
+#if TIMEX_HICOLOR
     push af
     ld a,(bridge_active)
     or a
@@ -989,6 +990,10 @@ draw_current_bridge_tank_table_ready:
     jp write_intact_bridge_tank_shifted_2xn
 draw_current_bridge_tank_world:
     pop af
+#else
+    ; The standard road carries bitmap lines, so the crossing tank composes
+    ; against the real queried background instead of assuming solid 0xff.
+#endif
     jp write_world_sprite_shifted_2xn
 
 draw_all_current_sprites_direct:
@@ -2179,6 +2184,7 @@ get_world_background_byte:
     cp PLAYFIELD_BOTTOM
     jr nc,world_background_water
 
+#if TIMEX_HICOLOR
     ; An intact bridge/road is the lower world layer: sixteen solid rows
     ; with no centre marking.
     ld a,(bridge_active)
@@ -2194,6 +2200,35 @@ get_world_background_byte:
     jr nc,world_background_course
     ld a,255
     ret
+#else
+    ; Standard build: the road look lives in the bitmap, so the band model
+    ; includes it: solid black edge lines at band rows 1/14, over the land
+    ; approaches only. A destroyed road keeps its lines while its former
+    ; span is ordinary water served by the course model.
+    ld a,(bridge_active)
+    ld b,a
+    ld a,(destroyed_road_active)
+    or b
+    jr z,world_background_course
+    ld a,(bridge_y)
+    ld b,a
+    ld a,(background_query_y)
+    cp b
+    jr c,world_background_course
+    sub b
+    cp 16
+    jr nc,world_background_course
+    cp 1
+    jp z,world_background_band_edge
+    cp 14
+    jp z,world_background_band_edge
+world_background_band_solid:
+    ld a,(bridge_active)
+    or a
+    jp z,world_background_course    ; destroyed road: course model serves it
+    ld a,255
+    ret
+#endif
 
 world_background_course:
     call resolve_course_block_index
@@ -2208,6 +2243,36 @@ world_background_course:
 world_background_water:
     xor a
     ret
+
+#if not TIMEX_HICOLOR
+world_background_band_edge:
+    ld a,(background_query_col)
+    ld c,a
+    call standard_band_edge_byte
+    or a
+    ret z                           ; a black line byte over the approach
+    jr world_background_band_solid  ; span column: solid road or water
+
+standard_band_edge_byte:
+    ; Input C=byte column. A=0 over a land approach, 255 over the span.
+    ld a,(bridge_col)
+    ld b,a
+    ld a,c
+    cp b
+    jr c,standard_band_edge_line
+    ld a,(bridge_width)
+    add a,b
+    ld b,a
+    ld a,c
+    cp b
+    jr c,standard_band_edge_solid
+standard_band_edge_line:
+    xor a
+    ret
+standard_band_edge_solid:
+    ld a,255
+    ret
+#endif
 
 resolve_course_block_index:
     ; background_query_y -> A = course block index through the row cache.
@@ -2265,6 +2330,7 @@ load_world_background_triplet:
     cp PLAYFIELD_BOTTOM
     jp nc,world_triplet_water
 
+#if TIMEX_HICOLOR
     ld a,(bridge_active)
     or a
     jr z,world_triplet_course
@@ -2281,6 +2347,71 @@ load_world_background_triplet:
     ld (world_background_byte_1),a
     ld (world_background_byte_2),a
     ret
+#else
+    ; Standard band model with road lines: build the base triplet (solid for
+    ; an intact band, course bytes for a destroyed road), then overlay black
+    ; line bytes on approach columns of the four marking rows.
+    ld a,(bridge_active)
+    ld b,a
+    ld a,(destroyed_road_active)
+    or b
+    jp z,world_triplet_course
+    ld a,(bridge_y)
+    ld b,a
+    ld a,(background_query_y)
+    cp b
+    jp c,world_triplet_course
+    sub b
+    cp 16
+    jp nc,world_triplet_course
+    ld (band_row_scratch),a
+    ld a,(bridge_active)
+    or a
+    jr z,world_triplet_band_course_base
+    ld a,255
+    ld (world_background_byte_0),a
+    ld (world_background_byte_1),a
+    ld (world_background_byte_2),a
+    jr world_triplet_band_overlay
+world_triplet_band_course_base:
+    call world_triplet_course
+world_triplet_band_overlay:
+    ld a,(band_row_scratch)
+    cp 1
+    jr z,world_triplet_overlay_edge
+    cp 14
+    jr z,world_triplet_overlay_edge
+    ret
+world_triplet_overlay_edge:
+    ld a,(background_query_col)
+    ld c,a
+    call world_triplet_overlay_byte_0
+    ld a,(background_query_col)
+    inc a
+    ld c,a
+    call world_triplet_overlay_byte_1
+    ld a,(background_query_col)
+    add a,2
+    ld c,a
+world_triplet_overlay_byte_2:
+    call standard_band_edge_byte
+    or a
+    ret nz                          ; span column keeps its base byte
+    ld (world_background_byte_2),a
+    ret
+world_triplet_overlay_byte_0:
+    call standard_band_edge_byte
+    or a
+    ret nz
+    ld (world_background_byte_0),a
+    ret
+world_triplet_overlay_byte_1:
+    call standard_band_edge_byte
+    or a
+    ret nz
+    ld (world_background_byte_1),a
+    ret
+#endif
 
 world_triplet_course:
     call resolve_course_block_index
@@ -3146,7 +3277,9 @@ bridge_paint_road_attribute_row:
     or a
     jr z,bridge_attr_paint_span
     ld b,a
-    ld a,0x67                       ; BRIGHT white ink, green road markings
+    ld a,0x44                       ; terrain-green ink over black paper: the
+                                    ; road look comes from bitmap lines, so
+                                    ; the 8x8 cells never clash with the banks
 bridge_attr_left_byte:
     ld (hl),a
     inc l
@@ -3169,7 +3302,7 @@ bridge_attr_span_byte:
     sub b
     ret z
     ld b,a
-    ld a,0x67
+    ld a,0x44
 bridge_attr_right_byte:
     ld (hl),a
     inc l

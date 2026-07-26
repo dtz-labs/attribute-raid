@@ -140,10 +140,14 @@ normally replays only that list instead of repeating bank/island comparisons.
 An island is a third land interval inside the river. It grows over consecutive
 blocks, maintains its width, and then narrows, creating a real fork without a
 second renderer or screen buffer. The bridge remains a separate object. It
-matches the current river width and is 16 scanlines high. A plain white road
-with no centre marking extends across the land on both sides, and the course
-generator keeps both banks straight in the span's immediate vicinity - a few
-blocks below and above it - while the rest of the river bends normally.
+matches the current river width and is 16 scanlines high. A road extends
+across the land on both sides, and the course generator keeps both banks
+straight in the span's immediate vicinity - a few blocks below and above it -
+while the rest of the river bends normally. The two builds style the road
+differently: Timex 8x1 paints it as a solid white band, while the standard
+build avoids 8x8 attribute clash entirely - its road cells keep terrain-green
+ink over black paper and the road is outlined by two solid black bitmap edge
+lines drawn only over the land approaches, never across the span.
 
 The first two character rows are a blank black upper margin. The river occupies
 152 scanlines (`Y=16..167`). The final three character rows form a fixed status
@@ -358,9 +362,10 @@ crossing is generated over a broad river.
 Destroying a bridge clears all 16 affected bitmap scanlines before rebuilding
 the complete banks, island, and river; the normal dirty renderer updates only
 bank edges and therefore cannot reconstruct a row which has been cleared
-completely. The brown centre span becomes blue water, while the white road
-approaches remain on both banks and keep scrolling down with the world without
-any further bitmap work.
+completely. The brown centre span becomes blue water, while the road
+approaches remain on both banks and keep scrolling down with the world - as a
+white band on Timex with no further bitmap work, and with their two black
+edge lines maintained per frame on the standard build.
 
 ## AY sound
 

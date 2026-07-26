@@ -179,6 +179,7 @@ background_query_col: db 0
 background_cache_y: db 255
 background_cache_index: db 0
 background_cache_rows_left: db 0 ; rows sharing the cached block, incl. cached Y
+band_row_scratch: db 0           ; standard build: band-relative query row
 world_background_byte_0: db 0
 world_background_byte_1: db 0
 world_background_byte_2: db 0
