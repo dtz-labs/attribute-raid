@@ -16,8 +16,26 @@
   h1 { color: #ffff55; font-size: 1.5rem; margin: 0 0 0.25rem; }
   p  { margin: 0.4rem auto; max-width: 42rem; line-height: 1.45; }
   a  { color: #55ffff; }
-  #jsspeccy { margin: 1.25rem auto; }
+  #jsspeccy {
+    margin: 1.25rem auto;
+    display: flex;
+    justify-content: center;
+  }
   .keys { color: #55ff55; }
+  .sound-hint { color: #ffff55; }
+  .sponsor {
+    display: inline-block;
+    margin-top: 1.25rem;
+    padding: 0.65rem 1.2rem;
+    background: #ffdd00;
+    color: #101010;
+    font-weight: bold;
+    text-decoration: none;
+    border-radius: 6px;
+    border: 2px solid #101010;
+    box-shadow: 0 0 0 2px #ffdd00;
+  }
+  .sponsor:hover { background: #ffff55; }
   .footer { margin-top: 1.5rem; font-size: 0.85rem; color: #909090; }
 </style>
 </head>
@@ -26,14 +44,17 @@
 <p>A River Raid-style game for the ZX Spectrum. This page always runs the
 latest TAP built from <a href="https://github.com/dtz-labs/attribute-raid">main</a>
 on an emulated Spectrum 128K, so the AY sound effects ported from the
-Atari&nbsp;2600 original are audible. Click the display to give it the
-keyboard (and to let the browser start audio).</p>
+Atari&nbsp;2600 original are audible.
+<span class="sound-hint">Click the display once — that gives it the keyboard
+and lets the browser start the AY sound.</span></p>
 <p class="keys">O/P — steer &nbsp; Q — fast &nbsp; A — slow &nbsp;
 SPACE — fire &nbsp; R — new game</p>
 <div id="jsspeccy"></div>
 <p>The dedicated Timex TC2048/TC2068/TS2068 hi-colour build is not playable
 here (JSSpeccy has no Timex video modes) — grab it from the
 <a href="https://github.com/dtz-labs/attribute-raid/releases">releases</a>.</p>
+<p><a class="sponsor" href="https://buymeacoffee.com/mpasternak">☕ Sponsor
+dtz-labs — support new ZX Spectrum software</a></p>
 <p class="footer">Emulation by
 <a href="https://github.com/gasman/jsspeccy3">JSSpeccy&nbsp;3</a> (GPL-3).</p>
 <script src="jsspeccy/jsspeccy.js"></script>
