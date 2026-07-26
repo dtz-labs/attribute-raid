@@ -121,6 +121,7 @@ spawn_ship0:
     ld (ship0_y),a
     ld a,1
     ld (ship0_active),a
+    ld a,(ship0_y)                  ; the active flag above clobbered the Y
     call calc_safe_river_x_wide
     ld (ship0_x),a
     ret
@@ -169,6 +170,7 @@ spawn_ship1:
     ld (ship1_y),a
     ld a,1
     ld (ship1_active),a
+    ld a,(ship1_y)                  ; the active flag above clobbered the Y
     call calc_safe_river_x_wide
     ld (ship1_x),a
     ld a,1
@@ -558,6 +560,7 @@ spawn_helicopter:
     ld (helicopter_y),a
     ld a,1
     ld (helicopter_active),a
+    ld a,(helicopter_y)             ; the active flag above clobbered the Y
     call calc_safe_river_x
     ld (helicopter_x),a
     ld a,(helicopter_move)
