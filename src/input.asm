@@ -4,10 +4,19 @@
 
 read_keyboard:
 #if AUTOPILOT
-    ; Benchmark build: fly straight at permanent fast scroll and refire the
-    ; moment the bullet slot frees up; the physical inputs are ignored.
-    xor a
+    ; Benchmark build: permanent fast scroll, refire the moment the bullet
+    ; slot frees up, and weave left/right in 32-frame halves so the full
+    ; steering recomposition path is exercised too.
+    ld a,(autopilot_steer_phase)
+    inc a
+    ld (autopilot_steer_phase),a
+    and 32
+    ld a,1
+    jr z,autopilot_steer_ready
+    ld a,255
+autopilot_steer_ready:
     ld (player_move),a
+    xor a
     ld (joystick_state),a
     ld (slow_phase),a
     ld a,2

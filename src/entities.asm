@@ -1211,6 +1211,10 @@ update_bridge:
     ld (bridge_active),a
     xor a
     ld (destroyed_road_active),a
+    ; Anchor the band on the block boundary: the newest block occupies rows
+    ; 0..phase, so the two latched flat blocks begin at exactly phase+1.
+    ld a,(course_phase)
+    inc a
     ld (bridge_y),a
     call get_bounds_for_y
     ld a,d

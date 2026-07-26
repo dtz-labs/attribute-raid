@@ -29,6 +29,7 @@ init_course:
     ld (fork_step),a
     ld (next_feature),a
     ld (bridge_spawn_pending),a
+    ld (bridge_spawn_next),a
     ld (bridge_width_mode),a
     ld (bridge_straight_blocks),a
     ld a,255
@@ -66,13 +67,25 @@ generate_next_block:
     ret
 
 generate_block:
+    ; A scheduled bridge spawns two blocks late and lands on a block
+    ; boundary, so the whole 16-line board covers exactly the two blocks
+    ; generated after the decision - both on the latched flat banks.
+    ld a,(bridge_spawn_next)
+    or a
+    jr z,generate_block_no_handoff
+    dec a
+    ld (bridge_spawn_next),a
+    jr nz,generate_block_no_handoff
+    ld a,1
+    ld (bridge_spawn_pending),a
+generate_block_no_handoff:
     call update_course_motion
 
-    ; Only the few blocks entering just above the span stay straight: the
-    ; counter set at bridge generation skips applying the steps (they are
-    ; preserved, not zeroed - zeroing once left half_step dead after a narrow
-    ; bridge and no later feature could ever trigger again). Once the counter
-    ; runs out the river resumes bending even while the board is on screen.
+    ; Blocks of the bridge board and the few above it skip applying the
+    ; motion steps (they are preserved, not zeroed - zeroing once left
+    ; half_step dead after a narrow bridge and no later feature could ever
+    ; trigger again). Once the counter runs out the river resumes bending
+    ; even while the board is still on screen.
     ld a,(bridge_straight_blocks)
     or a
     jr z,generate_block_banks_move
@@ -143,9 +156,14 @@ center_x_ready:
 generate_block_banks_frozen:
 
     call update_course_feature
+    call course_bridge_flat_banks
+    ld (course_flat_banks),a
 
     ; Convert exact pixel edges to a byte column and one of eight masks. The
     ; old half-byte-only representation was what made every bend look boxed.
+    ; In the bridge's flat zone both edges snap outward to byte boundaries,
+    ; so the road always meets a straight bank exactly flush with its ends -
+    ; while the span stands and after it is destroyed.
     ld a,(gen_center_x)
     ld b,a
     ld a,(gen_half_x)
@@ -154,6 +172,13 @@ generate_block_banks_frozen:
     ld a,b
     sub c
     ld d,a
+    ld a,(course_flat_banks)
+    or a
+    ld a,d
+    jr z,course_left_x_ready
+    ld a,(flat_left_x)
+    ld d,a
+course_left_x_ready:
     push af
     ld a,(course_block_head)
     ld l,a
@@ -189,6 +214,13 @@ generate_block_banks_frozen:
     ld a,b
     add a,c
     ld d,a
+    ld a,(course_flat_banks)
+    or a
+    ld a,d
+    jr z,course_right_x_ready
+    ld a,(flat_right_x)
+    ld d,a
+course_right_x_ready:
     push af
     ld a,(course_block_head)
     ld l,a
@@ -458,25 +490,24 @@ block_delta_address:
     ret
 
 update_course_motion:
-    ; Only the bridge's immediate vicinity keeps straight banks: stop the
-    ; meander for the last few blocks below a scheduled bridge, while the
-    ; symmetric width logic still runs so the deliberately narrow bridge
-    ; variant keeps working. Further from the span the river bends normally.
-    ld a,(next_feature)
-    or a
-    jr z,course_motion_free
-    ld a,(feature_countdown)
-    cp 5
-    jr nc,course_motion_free
-    xor a
-    ld (center_step),a
-    ret
-course_motion_free:
     ld a,(motion_timer)
     or a
     jr z,pick_course_motion
     dec a
     ld (motion_timer),a
+    ret
+
+course_bridge_flat_banks:
+    ; A=nonzero while the generated block belongs to the bridge's flat-bank
+    ; zone: the decision block, the delayed spawn block, or the straight
+    ; blocks entering just above the span.
+    ld a,(bridge_spawn_next)
+    ld b,a
+    ld a,(bridge_spawn_pending)
+    or b
+    ld b,a
+    ld a,(bridge_straight_blocks)
+    or b
     ret
 pick_course_motion:
     call lfsr_next
@@ -560,9 +591,26 @@ generate_bridge_now:
     ld a,(bridge_width_mode)
     xor 1
     ld (bridge_width_mode),a
-    ld a,1
-    ld (bridge_spawn_pending),a
-    ld a,4                          ; keep the next few blocks above it straight
+    ld a,2
+    ld (bridge_spawn_next),a
+    ; Latch both edges snapped outward to byte boundaries. Every block of
+    ; the flat zone reuses these exact values, so the road always meets a
+    ; perfectly straight bank flush with its ends - while the span stands
+    ; and after its destruction alike.
+    ld a,(gen_center_x)
+    ld b,a
+    ld a,(gen_half_x)
+    ld c,a
+    ld a,b
+    sub c
+    and 0xf8
+    ld (flat_left_x),a
+    ld a,b
+    add a,c
+    add a,7
+    and 0xf8
+    ld (flat_right_x),a
+    ld a,6
     ld (bridge_straight_blocks),a
     ld a,24
     ld (feature_countdown),a

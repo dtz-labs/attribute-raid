@@ -22,7 +22,10 @@ feature_countdown: db 40
 fork_step: db 0
 next_feature: db 0
 bridge_spawn_pending: db 0
+bridge_spawn_next: db 0          ; bridge decided; spawn on the next block
 bridge_straight_blocks: db 0     ; blocks above a new span generated straight
+flat_left_x: db 0                ; latched byte-aligned edges of the board zone
+flat_right_x: db 0
 generated_island_left: db 255
 generated_island_right: db 255   ; 255 in both island fields means no fork
 
@@ -180,6 +183,9 @@ background_cache_y: db 255
 background_cache_index: db 0
 background_cache_rows_left: db 0 ; rows sharing the cached block, incl. cached Y
 band_row_scratch: db 0           ; standard build: band-relative query row
+autopilot_steer_phase: db 0      ; benchmark build: 32-frame steering halves
+world_write_addr: dw 0           ; incremental screen cursor of the compositor
+course_flat_banks: db 0          ; generated block sits in the bridge flat zone
 world_background_byte_0: db 0
 world_background_byte_1: db 0
 world_background_byte_2: db 0

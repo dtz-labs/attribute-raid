@@ -2416,6 +2416,31 @@ world_triplet_overlay_byte_1:
 world_triplet_course:
     call resolve_course_block_index
     ld b,a
+    ; Pure open water is the common case under the player: when all three
+    ; columns lie strictly between the bank edge bytes of an island-free
+    ; block, the triplet is three zeros without touching the block bitmap.
+    ld l,a
+    ld h,HIGH(block_island_left)
+    ld a,(hl)
+    inc a                           ; 255 means no island
+    jr nz,world_triplet_course_mixed
+    ld h,HIGH(block_left_col)
+    ld a,(background_query_col)
+    ld c,a
+    ld a,(hl)
+    cp c
+    jr nc,world_triplet_course_mixed ; touches the left edge byte or land
+    ld h,HIGH(block_right_col)
+    ld a,c
+    add a,2
+    cp (hl)
+    jr nc,world_triplet_course_mixed ; touches the right edge byte or land
+    xor a
+    ld (world_background_byte_0),a
+    ld (world_background_byte_1),a
+    ld (world_background_byte_2),a
+    ret
+world_triplet_course_mixed:
     ld a,(background_query_col)
     ld c,a
     ld a,b
@@ -2981,8 +3006,10 @@ write_world_2_row:
 
 write_world_sprite_shifted_2xn:
     ; Input A=Y, C=pixel X, B=height, DE=eight-pointer shift table. This is the
-    ; direct mixed-terrain compositor used by the crossing plane and bridge
-    ; tank in both builds.
+    ; direct mixed-terrain compositor used by the player, the crossing plane
+    ; and the bridge tank. The screen address advances incrementally between
+    ; rows and the three bytes compose in registers, because a steering player
+    ; runs all fourteen rows through here every frame.
     ld (world_write_y),a
     ld a,b
     ld (world_write_rows),a
@@ -2993,71 +3020,85 @@ write_world_sprite_shifted_2xn:
     ld l,a
     ld h,0
     add hl,de
-    ld e,(hl)
+    ld a,(hl)
     inc hl
-    ld d,(hl)
+    ld h,(hl)
+    ld l,a
+    ex de,hl                          ; DE = resolved sprite row cursor
     ld a,c
     srl a
     srl a
     srl a
     ld (world_write_col),a
-write_world_shifted_2_row:
     ld a,(world_write_y)
     cp PLAYFIELD_BOTTOM
     ret nc
+    push de
+    call calc_screen_line_addr
+    pop de
+    ld a,(world_write_col)
+    add a,l
+    ld l,a
+    ld (world_write_addr),hl
+write_world_shifted_2_row:
     ld a,(world_write_col)
     ld c,a
     ld a,(world_write_y)
     call load_world_background_triplet
 
-    ld a,(de)
-    inc de
-    ld b,a
+    ld hl,(world_write_addr)
     ld a,(world_background_byte_0)
-    xor b
-    ld (world_write_byte_0),a
-
-    ld a,(de)
-    inc de
     ld b,a
-    ld a,(world_background_byte_1)
-    xor b
-    ld (world_write_byte_1),a
-
     ld a,(de)
-    inc de
-    ld b,a
-    ld a,(world_background_byte_2)
     xor b
-    ld (world_write_byte_2),a
-
-    ld a,(world_write_y)
-    push de                           ; calc_screen_line_addr returns via DE/HL
-    call calc_screen_line_addr
-    pop de                            ; keep the sprite source cursor resident
-    ld a,(world_write_col)
-    add a,l
-    ld l,a
-    ld a,(world_write_byte_0)
     ld (hl),a
+    inc de
     inc l
-    ld a,(world_write_byte_1)
+    ld a,(world_background_byte_1)
+    ld b,a
+    ld a,(de)
+    xor b
     ld (hl),a
+    inc de
     ld a,(world_write_spill)
     or a
     jr z,write_world_shifted_2_skip_spill
     inc l
-    ld a,(world_write_byte_2)
+    ld a,(world_background_byte_2)
+    ld b,a
+    ld a,(de)
+    xor b
     ld (hl),a
 write_world_shifted_2_skip_spill:
-    ld a,(world_write_y)
-    inc a
-    ld (world_write_y),a
+    inc de
+
     ld a,(world_write_rows)
     dec a
     ld (world_write_rows),a
-    jp nz,write_world_shifted_2_row
-    ret
+    ret z
+    ld a,(world_write_y)
+    inc a
+    ld (world_write_y),a
+    cp PLAYFIELD_BOTTOM
+    ret nc
+    ; Incremental Spectrum display-file step to Y+1 for the same columns.
+    ld hl,(world_write_addr)
+    inc h
+    and 7
+    jr nz,write_world_shifted_2_addr_ready
+    ld a,h
+    sub 8
+    ld h,a
+    ld a,l
+    add a,32
+    ld l,a
+    jr nc,write_world_shifted_2_addr_ready
+    ld a,h
+    add a,8
+    ld h,a
+write_world_shifted_2_addr_ready:
+    ld (world_write_addr),hl
+    jp write_world_shifted_2_row
 
 bridge_fill_rows:
     ; Input A=start Y, B=row count, C=byte value. The bridge is maintained as
