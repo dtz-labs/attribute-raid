@@ -64,8 +64,10 @@
 <h1>ATTRIBUTE RAID</h1>
 <p>A River Raid-style game for the ZX Spectrum. This page always runs the
 latest TAP built from <a href="https://github.com/dtz-labs/attribute-raid">main</a>
-on an emulated Spectrum 128K or Timex, so the AY sound effects ported from the
-Atari&nbsp;2600 original are audible.
+on an emulated <strong>Timex TC2068</strong> by default &mdash; the dedicated
+hi-colour build - with the TC2048 and the plain Spectrum 128K a click away.
+The AY sound effects ported from the Atari&nbsp;2600 original are audible on
+all three.
 <span class="sound-hint">Press the ▶ button on the display to start — the
 game boots with AY sound (browsers only allow audio after that click).</span></p>
 <p class="keys">O/P — steer &nbsp; Q — fast &nbsp; A — slow &nbsp;
@@ -73,14 +75,15 @@ SPACE — fire &nbsp; R — new game</p>
 <p><a class="sponsor" href="https://buymeacoffee.com/mpasternak">☕ Sponsor
 dtz-labs — support new ZX Spectrum software</a></p>
 <div class="switch">
-  <a id="pick-128" href="?m=128">Spectrum 128K</a>
-  <a id="pick-2048" href="?m=2048">Timex TC2048</a>
   <a id="pick-2068" href="?m=2068">Timex TC2068</a>
+  <a id="pick-2048" href="?m=2048">Timex TC2048</a>
+  <a id="pick-128" href="?m=128">Spectrum 128K</a>
 </div>
 <div id="jsspeccy"></div>
-<p>The Timex builds are the dedicated hi-colour version, playable here now —
-the emulator below is our <a href="https://github.com/dtz-labs/jsspeccy3">fork of
-JSSpeccy&nbsp;3</a>, which adds the TC2048 and TC2068. Both TAPs are also in the
+<p>The Timex versions run on our <a href="https://github.com/dtz-labs/jsspeccy3">fork
+of JSSpeccy&nbsp;3</a>, which adds the TC2048 and TC2068; stock JSSpeccy has no
+Timex video modes, so until now the hi-colour build could only be downloaded.
+Both TAPs are also in the
 <a href="https://github.com/dtz-labs/attribute-raid/releases">releases</a>.</p>
 <p class="footer">Emulation by
 <a href="https://github.com/gasman/jsspeccy3">JSSpeccy&nbsp;3</a> (GPL-3), in the
@@ -89,12 +92,12 @@ JSSpeccy&nbsp;3</a>, which adds the TC2048 and TC2068. Both TAPs are also in the
 <script>
 (function () {
     var BUILDS = {
-        '128':  { machine: 128,  tap: 'attribute-raid.tap' },
+        '2068': { machine: 2068, tap: 'attribute-raid-timex.tap' },
         '2048': { machine: 2048, tap: 'attribute-raid-timex.tap' },
-        '2068': { machine: 2068, tap: 'attribute-raid-timex.tap' }
+        '128':  { machine: 128,  tap: 'attribute-raid.tap' }
     };
     var wanted = new URLSearchParams(location.search).get('m');
-    var key = BUILDS[wanted] ? wanted : '128';
+    var key = BUILDS[wanted] ? wanted : '2068';
     var chosen = BUILDS[key];
 
     document.getElementById('pick-' + key).setAttribute('aria-current', 'true');
