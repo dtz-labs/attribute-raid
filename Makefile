@@ -1,6 +1,6 @@
 .PHONY: all standard timex run run-48 run-timex run-tc2048 run-tc2068 \
 	run-ts2068 profile run-profile profile-timex run-profile-timex \
-	zesarux-config clean
+	zesarux-config sound-data clean
 
 OUTDIR := build
 TAP := $(OUTDIR)/attribute-raid.tap
@@ -94,6 +94,9 @@ zesarux-config:
 	printf '%s\n' "$$joy" >> "$(ZESARUX_CONFIG).new"; \
 	mv "$(ZESARUX_CONFIG).new" "$(ZESARUX_CONFIG)"; \
 	echo "Updated $(ZESARUX_CONFIG) from $(HOME)/.zesaruxrc"
+
+sound-data:
+	python3 tools/tia2ay.py src/sound_ay_data.asm
 
 clean:
 	rm -rf build build-profile build-profile-timex build-timex

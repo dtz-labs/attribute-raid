@@ -743,6 +743,10 @@ spawn_fuel_at_top:
     jp consume_fuel
 
 refill_player_fuel:
+    ; The ping retries every contact frame like the original's collision
+    ; check; start_fuel_ding gates itself, which produces the repeating
+    ; pulse (an octave higher once the tank is full).
+    call start_fuel_ding
     ld a,(fuel_refill_timer)
     dec a
     ld (fuel_refill_timer),a
@@ -751,12 +755,9 @@ refill_player_fuel:
     ld (fuel_refill_timer),a
     ld a,(fuel_level)
     cp 48
-    jp nc,start_fuel_ding           ; full tank keeps the higher confirmation ping
+    ret nc                          ; full tank only keeps pinging
     inc a
     ld (fuel_level),a
-    push af
-    call start_fuel_ding
-    pop af
     and 7                           ; one HUD cell changes every eight units
     ret nz
     jp mark_fuel_hud_dirty
@@ -786,6 +787,7 @@ check_consumed_fuel_empty:
     ret nz
 out_of_fuel:
     ld a,1
+    ld (crash_sound_kind),a         ; running dry gets the original's id-2 burst
     ld (crashed),a
     ret
 

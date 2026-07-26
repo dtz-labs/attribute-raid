@@ -129,7 +129,11 @@ init_entities:
     ld (explosion_anim_timer),a
     ld (explosion_frame),a
     ld (hit_explosion_active),a
-    ld (explosion_sound_timer),a
+    ld (missile_sound_left),a
+    ld (c_sound_left),a
+    ld (c_sound_kind),a
+    ld (a_burst_left),a
+    ld (crash_sound_kind),a
     ld (slow_phase),a
     ld (joystick_state),a
     ld a,1

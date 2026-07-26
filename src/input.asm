@@ -38,10 +38,7 @@ autopilot_steer_ready:
     ld a,(player_y)
     sub 4
     ld (bullet_y),a
-    ld a,17                         ; 16 audible AY frames plus final mute
-    ld (shot_sound_timer),a
-    ld a,80                         ; lower initial pitch; period rises per frame
-    ld (shot_sound_period),a
+    call start_missile_sound        ; the original's descending sweep
     ld a,1
     ld (fire_pending),a
     ret
@@ -175,10 +172,7 @@ fire_pressed:
     ld a,(player_y)
     sub 4
     ld (bullet_y),a
-    ld a,17                         ; 16 audible AY frames plus final mute
-    ld (shot_sound_timer),a
-    ld a,80                         ; lower initial pitch; period rises per frame
-    ld (shot_sound_period),a
+    call start_missile_sound        ; the original's descending sweep
     ld a,1
     ld (fire_pending),a
     jr read_reset_key

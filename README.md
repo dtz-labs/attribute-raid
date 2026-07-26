@@ -380,23 +380,29 @@ edge lines maintained per frame on the standard build.
 
 ## AY sound
 
-The original Atari sound routine uses a white-noise jet channel whose frequency
-depends on vertical speed and a separate short missile tone. The AY adaptation
-keeps the same division of labour:
+The effects are a port of the original Atari 2600 sound routine: its per-frame
+TIA register behaviour was transcribed from the commented River Raid
+disassembly and converted offline by `tools/tia2ay.py` into the AY frame
+tables in the generated, committed `src/sound_ay_data.asm` (tone frequencies
+convert exactly, noise pitches map order-preservingly into the AY range,
+linear TIA volumes map onto the AY's logarithmic scale, and every sequence is
+resampled from 60 Hz to 50 Hz). Run `make sound-data` after changing the
+converter. The channel layout:
 
-- channel A is noise-only engine sound,
-- slow, base, and fast movement select progressively higher noise frequencies
-  and volumes,
-- channel B is a tone-only missile sweep,
-- each shot starts a sixteen-frame software envelope: tone period increases
-  from a deliberately lower initial pitch while volume falls from 8 to 0,
-  producing a descending `bziu-uum`,
-- tank fire restarts channel B with a sharper, louder sweep,
-- channel C adds falling tone/noise bursts for impacts, the player's crash and
-  the tank shell's water splash,
-- refuelling temporarily turns channel C into a clean four-frame bell whose
-  pitch remains constant while fuel is being added; reaching a full tank and
-  remaining over the depot produces repeating pings exactly one octave higher.
+- channel A is the white-noise jet engine; slow, base, and fast movement
+  sample the original's speed-to-frequency formula, and fast flight is louder,
+- channel A also carries the low-fuel warning (below a quarter tank the
+  engine periodically gives way to the original's rising siren tone) and the
+  life-lost noise burst, which uses a longer, higher variant when the tank
+  runs dry,
+- channel B replays the missile's descending frequency sweep; tank fire keeps
+  its own sharper sweep (the shore gun has no Atari counterpart),
+- channel C plays the destroyed-actor burst — white noise whose frequency is
+  re-randomised every frame, giving the original's crackle — plus the tank
+  shell's water splash,
+- refuelling repeats the original's short decaying ping for as long as the
+  aircraft touches the depot, jumping exactly one octave higher once the tank
+  is full.
 
 Engine registers are rewritten only when the requested speed changes. A stock
 48K Spectrum continues to run the same game code silently; use `make run` for a

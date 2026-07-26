@@ -1253,7 +1253,7 @@ begin_crash:
     ld a,1
     ld (game_state),a
     call silence_ay
-    call start_ay_explosion
+    call start_ay_crash
     ld a,75
     ld (explosion_timer),a
     ld a,5
@@ -1277,9 +1277,9 @@ begin_crash:
 crash_wait_frame:
     ; Freeze the river and all enemies for 75 display frames (1.5 seconds).
     ; Frozen actors remain resident in VRAM. Only replace the explosion on its
-    ; five-frame animation boundary; the short AY burst still advances every
-    ; frame independently of bitmap work.
-    call update_ay_explosion
+    ; five-frame animation boundary; the AY burst and crackle still advance
+    ; every frame independently of bitmap work.
+    call update_ay_sound
 #if PROFILE_BORDER
     call profile_begin
 #endif
@@ -1511,16 +1511,12 @@ left_edge_masks:
 right_edge_masks:
     db 0xff,0x7f,0x3f,0x1f,0x0f,0x07,0x03,0x01
 
-ay_engine_noise_periods:
-    ; Slow, normal, fast. AY noise frequency rises as the period falls.
-    db 31,20,10
-ay_engine_volumes:
-    db 4,6,8
-
 fork_left_offsets:
     db 0,255,255,254,254,254,254,255,255,0
 fork_widths:
     db 1,2,3,4,4,4,4,3,2,1
+
+#include "sound_ay_data.asm"
 
 #include "sprite_data.asm"
 

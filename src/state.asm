@@ -247,12 +247,18 @@ slow_phase: db 0                 ; alternates 0/1 scroll for average 0.5 px
 joystick_state: db 0             ; sanitized Kempston bits 0..4
 ay_last_speed: db 255             ; avoids rewriting unchanged engine registers
 timex_ay_present: db 0            ; 1 only for a ROM-confirmed TC2068/TS2068
-shot_sound_timer: db 0            ; 17..0 software amplitude/frequency envelope
-shot_sound_period: db 80           ; larger AY period gives the requested lower shot
-explosion_sound_timer: db 0       ; channel C impact envelope, 16..0
-explosion_sound_period: dw 384
-ding_sound_timer: db 0             ; four-frame channel C refuelling bell
-ding_sound_period: db 160          ; normal refuel ping; full-tank ping uses 80
+shot_sound_timer: db 0            ; tank shell sweep envelope, 25..0
+shot_sound_period: db 12           ; sweep period; grows by eight per frame
+missile_sound_ptr: dw 0           ; player missile cursor into the frame table
+missile_sound_left: db 0          ; missile frames still to play
+c_sound_ptr: dw 0                 ; channel C effect cursor
+c_sound_left: db 0                ; channel C frames still to play
+c_sound_kind: db 0                ; 0 idle, 1 impact, 2 splash, 3 ding
+a_burst_ptr: dw 0                 ; channel A life-lost burst cursor
+a_burst_left: db 0                ; burst frames still to play
+crash_sound_kind: db 0            ; 1 selects the out-of-fuel burst variant
+siren_tone_active: db 0           ; low-fuel warning currently owns channel A
+siren_phase: db 0                 ; index into the low-fuel warning cycle
 
 ; Game/HUD state. Score digits live beside hud_text in writable constant data;
 ; direct ASCII carry makes a HUD refresh division-free.
