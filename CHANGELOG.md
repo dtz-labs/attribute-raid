@@ -9,6 +9,9 @@ both TAPs to every tagged release.
 
 ### Added
 
+- Loading screen: both TAPs carry a `SCREEN$` block (converted in
+  `assets/loading-screen.scr`) shown while the code block loads.
+
 - Sound effects ported from the Atari 2600 original: the per-frame TIA
   register behaviour of River Raid's sound routine, transcribed from Thomas
   Jentzsch's commented disassembly, is converted offline by `tools/tia2ay.py`
@@ -32,6 +35,8 @@ both TAPs to every tagged release.
 
 - `src/sound_ay.asm` is now a table-driven per-frame player; the tank shell
   sweep and the water splash keep their previous, Spectrum-original sounds.
+- README shortened to an overview; technical documentation moved to `docs/`
+  (building, Timex support, renderer, gameplay, sound).
 - Standard-build road restyled as black bitmap edge lines.
 - Bridges align to the attribute grid, land on flush banks, and their boards
   spawn no conflicting actors.
