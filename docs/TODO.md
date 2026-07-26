@@ -41,22 +41,58 @@ Measurement caveats, learned the hard way:
 
 ## Correctness
 
-1. **Do resident fixed-X sprites erode the banks the way projectiles did?**
-   Unverified suspicion, same mechanism as the settled projectile bug. `balloon_x`
-   (`src/entities.asm:666`) and `ship0_x` (`:125`) are latched once at spawn from
-   `calc_safe_river_x` and never re-clamped, while the river keeps meandering
-   around them, and they are drawn with the opaque `write_water_sprite_2xn` /
-   `write_water_sprite_1xn` rather than a world-composing writer. A balloon
-   spawns mid-lane (at least 28 px of clearance at the narrowest river) but lives
-   for roughly nineteen course blocks, and a bank edge moves up to four pixels
-   per block, so the clearance can in principle be consumed. The FUEL depot is
-   already immune because `load_world_background_triplet`
-   (`src/sprite_renderer.asm:2408-2444`) overlays it into the world query.
-   Investigate before changing anything: the damage scanner used for the
-   projectile bug excluded mismatches that a live sprite explained, so it would
-   have hidden exactly this case - the scan must attribute per sprite instead.
-   If it reproduces, the fix is to move these writers onto the world compositor,
-   which costs time; measure first.
+1. **Resident sprites eat terrain along island and bank edges. Confirmed,
+   partly fixed, and the remaining half is the largest known correctness bug.**
+   All five resident actors damage the world, on both the draw path (the opaque
+   `write_water_sprite_2xn` / `_1xn` / `_shifted_2xn` / `_shifted_4xn`) and the
+   cleanup path (`fill_uniform_sprite_rect` with `E=0`, and
+   `transition_background = 0` in the exception branches). Measured over 200 s of
+   autopilot: 18 513 damaging writes, half of them full `0xFF` bytes. FUEL is the
+   worst offender, then ship1, ship0, the helicopter, the balloon. Present on
+   `main`, not introduced by the projectile work.
+
+   **Discard the obvious theory first.** The damage is NOT the river meandering
+   into a latched X. A world-anchored sprite advances `y += speed_pixels` on
+   exactly the frames the course advances by the same amount, and
+   `get_block_index_for_y` is `head - ((y+7-phase)>>3)`, so both terms move
+   together and the index cancels: a resident sprite sits over the same course
+   blocks for its whole life and the terrain under it never changes (128 120
+   samples, no violation). The bend budget of four pixels per block is irrelevant.
+
+   **The actual cause is vertical extent.** The safe X comes from ONE scanline
+   sample, but these sprites are 8 to 32 scanlines tall and therefore span two to
+   five course blocks, whose banks differ by up to four pixels and whose island
+   edge jumps a whole byte column between adjacent blocks
+   (`fork_left_offsets`/`fork_widths`). The rows below the sampled one land on
+   terrain nobody checked. The patrol clamps have the same defect:
+   `patrol_helicopter` (`src/entities.asm:584`) and `patrol_ship1` (`:197`) call
+   `get_pixel_lane_bounds` with the actor's top row only.
+
+   A second cause, the three spawns that clobbered A and so sampled row 1, is
+   fixed. It was amplifying this one: ten percent of ship spawns landed partly
+   on land.
+
+   Two fix families. Composing the resident writers against
+   `load_world_background_triplet` and restoring real world bytes mirrors the
+   projectile fix but costs time on the most-drawn sprites. Making the placement
+   correct instead - intersect `get_pixel_lane_bounds` over every block the
+   sprite's height covers, at spawn and in the patrol clamps, and defer the spawn
+   when the intersection is too narrow - costs nothing at runtime and should be
+   sufficient, because a sprite that provably fits the water for its full height
+   can keep its opaque writer. Prefer the second; it is also the smaller change.
+
+   Two things to know before working on it. `render_dirty_rows` replays only the
+   per-block delta columns, so damage to a column that two adjacent blocks share
+   is never repaired - confirmed by watching one damaged column travel the whole
+   playfield untouched. And the damage is not cosmetic:
+   `check_player_background_pixels` (`src/entities.asm:2308`) tests the player
+   against the model, not the framebuffer, so eroded land stays lethal while
+   looking like water. Timex is unverified but shares the call-site logic.
+
+   The FUEL depot is NOT the immune contrast case, as previously recorded here:
+   `load_world_background_triplet` only makes OTHER sprites compose correctly
+   over the depot; the depot's own writer and its own water fill still assume
+   water.
 
 ## Performance
 
