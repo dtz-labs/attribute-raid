@@ -60,11 +60,7 @@ Measurement caveats, learned the hard way:
 
 ## Performance
 
-2. **Stage bridge destruction across two frames. Now the top performance item,
-   on evidence.** A profiling window that caught the frames just after a span
-   was destroyed measured the game running at half rate (43 % of frame
-   boundaries without an idle halt). Nothing else measured comes close.
-   `destroy_bridge_restore`
+2. **Stage bridge destruction across two frames.** `destroy_bridge_restore`
    (`src/entities.asm:1959-1979`) rebuilds all 16 world rows in the same frame as
    the explosion, score and attribute repaint, called mid-`update_bullet`
    (:1571) - the most expensive single frame left. Add a `bridge_destroying`
@@ -74,6 +70,15 @@ Measurement caveats, learned the hard way:
    "zero-interior-first" variant of `render_v3_row_indexed`
    (`src/course_renderer.asm:935`) so the destroy path can drop
    `render_full_world_row` (`src/entities.asm:1966-1972`).
+
+   Note before starting: measuring this is what exposed the destroyed-road slow
+   path (now fixed), and that was the dominant cost, not this frame. Staging
+   addresses one or two frames out of the ~76 the band lives for. It also needs
+   care that the earlier plan missed: while the rebuild is half finished the
+   band is half destroyed, but the world model carries a single `bridge_active`
+   bit for all sixteen rows, so the model has to be split by row against the
+   restore cursor or sprites compositing over the finished rows will stamp road
+   back onto them.
 
 3. **Hoist DI/EI + SP save out of the blitters to frame level.** Nine SP-driven
    blitters each pay their own `di` / `ld (sprite_saved_sp),sp` ... restore / `ei`
@@ -176,6 +181,14 @@ Measurement caveats, learned the hard way:
   invites the opposite conclusion.
 - **`prepare_transition_old_projectile_x`** masked twice and branched on a case
   that could never differ; the branch was dead, not merely ugly.
+- **A destroyed road kept the renderer on its slow path.** `destroyed_road_active`
+  lives until the band scrolls off the playfield - up to 76 frames - and
+  `fill_world_background_rect` sent all sixteen band rows through the per-byte
+  query engine for that whole time, so every sprite cleanup touching the band
+  paid it. Measured as a sustained half-rate stretch (43 % of frame boundaries
+  with no idle halt, alongside 56 % idle overall). Only band rows 1 and 14 carry
+  the black edge lines, so the other fourteen now take the fast block-bitmap
+  copy. This, not the destroy frame itself, was the bridge cost.
 
 ## Considered and rejected (do not revisit without new evidence)
 
