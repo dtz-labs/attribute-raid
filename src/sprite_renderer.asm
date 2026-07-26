@@ -772,14 +772,10 @@ prepare_transition_new_wide_ready:
     ret
 
 prepare_transition_old_projectile_x:
-    ; A is the actual two-pixel left edge.
+    ; A is the actual two-pixel left edge. The pair spills into the following
+    ; byte only at pixel offset 7, so this is the same test as
+    ; prepare_transition_new_projectile_x below, writing the old fields.
     ld c,a
-    and 7
-    ld a,1
-    jr nz,prepare_transition_old_projectile_check
-    jr prepare_transition_old_projectile_ready
-prepare_transition_old_projectile_check:
-    ld a,c
     and 7
     cp 7
     ld a,1
