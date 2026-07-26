@@ -796,6 +796,10 @@ def main() -> int:
         "AUTOPILOT": 0,
         "AUTOPILOT_NOFIRE": 0,
         "PLAYFIELD_BOTTOM": 168,
+        # Bridge crumble rhythm: frames between blasts, and the number of byte
+        # columns each blast takes off both ends of the hole.
+        "BRIDGE_CRUMBLE_PAUSE": 8,
+        "BRIDGE_CRUMBLE_CHUNK": 2,
     }
     for item in args.define:
         if "=" in item:

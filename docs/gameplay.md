@@ -83,11 +83,34 @@ Bridge placement alternates between the naturally reached river width and a
 deliberately narrow section (at most roughly 112 pixels of water), so not every
 crossing is generated over a broad river.
 
-Destroying a bridge clears all 16 affected bitmap scanlines before rebuilding
-the complete banks, island, and river; the normal dirty renderer updates only
-bank edges and therefore cannot reconstruct a row which has been cleared
-completely. The brown centre span becomes blue water, while the road
-approaches remain on both banks and keep scrolling down with the world - as a
-white band on Timex with no further bitmap work, and with their two black
-edge lines maintained per frame on the standard build.
+Destroying a bridge does not remove the span in one frame. The shot punches a
+two-byte hole where the player aimed, wide enough to fly through, and the hole
+then widens outward by `BRIDGE_CRUMBLE_CHUNK` byte columns on each side every
+`BRIDGE_CRUMBLE_PAUSE` frames (defaults: two columns, eight frames - a 16x16
+pixel chunk per side, the band being two character rows tall). Each stage
+restarts the impact explosion and its AY burst, alternating ends, so the span
+goes with a rhythm of separate blasts instead of a smooth dissolve. Both
+constants live in `tools/build.py` and can be overridden with `DEFINES=` to
+retune the rhythm without touching the source.
+
+The span stays `bridge_active` for the whole crumble, and that is what keeps
+the wreck scrolling with the world: the ordinary bridge machinery still moves
+the band, fills the rows entering at its bottom, restores the rows leaving its
+top, and repaints its colour cells. Only the hole columns are excluded, and
+they are excluded consistently - the world model reports river for them, the
+band writer steps over them, and the colour pass gives them water while the
+surviving road keeps its own attribute. Colouring the whole span as water at
+the moment of the hit is what used to make the abandoned road glare solid
+green: an `0xff` road byte under water paper shows its green INK. A hole column
+is rewritten from the world model rather than zero-filled, because the FUEL
+depot belongs to that model and may share those columns.
+
+Lethality is separate from existence. `bridge_lethal` is cleared by the hit, so
+the wreck kills nothing and is no longer a target while it crumbles;
+`check_player_background_pixels` tests that flag rather than `bridge_active`.
+Once the hole reaches both ends of the span the bridge hands over to the plain
+destroyed road, which needs no per-frame bitmap work: the brown centre is
+already blue water, while the road approaches remain on both banks and keep
+scrolling down with the world - as a white band on Timex, and with their two
+black edge lines maintained per frame on the standard build.
 

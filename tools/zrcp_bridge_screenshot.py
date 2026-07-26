@@ -135,7 +135,9 @@ def capture(z, syms, prefix):
     z.cmd("enter-cpu-step")
     try:
         dump = z.peek(0x4000, 0x1B00)
-        st = z.peek(syms["bridge_active"], 5)
+        # Read each symbol on its own: the state block's layout is not a
+        # contract, and a byte inserted into it used to silently shift these.
+        st = [z.peek(syms[n])[0] for n in SYMBOLS[:5]]
         live = [n for n in ENTITY_FLAGS if z.peek(syms[n])[0]]
     finally:
         render(dump, prefix + ".png")
@@ -163,8 +165,9 @@ def main():
         return 0
     deadline = time.time() + 600
     while time.time() < deadline:
-        st = z.peek(syms["bridge_active"], 3)
-        active, destroyed, by = st[0], st[1], st[2]
+        active = z.peek(syms["bridge_active"])[0]
+        destroyed = z.peek(syms["destroyed_road_active"])[0]
+        by = z.peek(syms["bridge_y"])[0]
         want = (
             (mode == "intact" and active)
             or (mode == "destroyed" and destroyed)

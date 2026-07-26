@@ -9,6 +9,14 @@ both TAPs to every tagged release.
 
 ### Added
 
+- Bridges crumble instead of vanishing. The shot punches a hole the plane can
+  fly through, and the hole then eats outward from it two byte columns at a
+  time, one chunk every eight frames, each with its own explosion and blast so
+  the span goes with a rhythm rather than a fade. The wreck stays part of the
+  bridge model for the whole sequence, so it scrolls down with the world like
+  the road it still is, and the surviving stumps keep their road colour while
+  only the blown columns turn to river.
+
 - Play-in-browser page: every push to `main` deploys the current 128K TAP to
   GitHub Pages, embedded in the vendored JSSpeccy 3 emulator
   (`site/`, `.github/workflows/pages.yml`), linked from the README.

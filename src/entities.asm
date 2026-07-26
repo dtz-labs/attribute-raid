@@ -1240,6 +1240,7 @@ tank_on_right:
     ret
 
 update_bridge:
+    call update_bridge_crumble
     call update_destroyed_road
     ld a,(bridge_spawn_pending)
     or a
@@ -1248,8 +1249,10 @@ update_bridge:
     ld (bridge_spawn_pending),a
     ld a,1
     ld (bridge_active),a
+    ld (bridge_lethal),a
     xor a
     ld (destroyed_road_active),a
+    ld (bridge_crumble_active),a
     ; Anchor the band on the block boundary: the newest block occupies rows
     ; 0..phase, so the two latched flat blocks begin at exactly phase+1.
     ; On the latched byte-aligned banks block_right_col is the first LAND
@@ -1331,6 +1334,8 @@ bridge_top_restored:
     call bridge_clear_road_attributes
     xor a
     ld (bridge_active),a
+    ld (bridge_lethal),a
+    ld (bridge_crumble_active),a
     ld (bridge_tank_mode),a
     ld (bridge_tank_active),a
     ret
@@ -1369,6 +1374,9 @@ update_destroyed_road:
     ld a,(destroyed_road_active)
     or a
     ret z
+    ld a,(bridge_active)
+    or a
+    ret nz                          ; still crumbling: the bridge path scrolls it
     ld a,(speed_pixels)
     or a
     ret z
@@ -1462,36 +1470,6 @@ standard_road_line_segment:
     ret
 #endif
 
-bridge_fill_full_bitmap_row:
-    ; Input A=Y, C=byte. Road rows are inside a bridge band, so land plus
-    ; bridge makes the complete 256-pixel scanline solid.
-    cp 16
-    ret c
-    cp PLAYFIELD_BOTTOM
-    ret nc
-    call calc_screen_line_addr
-    ld b,4
-    ld a,c
-bridge_full_bitmap_byte:
-    ld (hl),a
-    inc l
-    ld (hl),a
-    inc l
-    ld (hl),a
-    inc l
-    ld (hl),a
-    inc l
-    ld (hl),a
-    inc l
-    ld (hl),a
-    inc l
-    ld (hl),a
-    inc l
-    ld (hl),a
-    inc l
-    djnz bridge_full_bitmap_byte
-    ret
-
 update_bullet:
     ld a,(fire_pending)
     or a
@@ -1540,9 +1518,9 @@ move_bullet_up:
     ; Actor sprites are absent from the bitmap during collision, so the
     ; crossing aircraft is tested explicitly above. Bridge geometry is also
     ; explicit because a background hit on it must award points and destroy it.
-    ld a,(bridge_active)
+    ld a,(bridge_lethal)
     or a
-    jp z,bullet_checks_destroyed_road
+    jp z,bullet_checks_destroyed_road ; a wreck mid-crumble is no longer a target
     ld a,(bullet_y)
     add a,10                        ; swept projectile bottom
     ld b,a
@@ -1960,38 +1938,219 @@ destroy_bridge:
     call add_score_100
     call add_score_100
     call destroy_bridge_tank_bonus
-    call bridge_paint_destroyed_road_attributes
-    ld a,(bridge_y)
-    ld (bridge_restore_y),a
-    ld a,16
-    ld (bridge_restore_rows),a
-destroy_bridge_restore:
-    ld a,(bridge_restore_rows)
-    or a
-    jr z,destroy_bridge_done
-    ld a,(bridge_restore_y)
-    cp PLAYFIELD_BOTTOM
-    jr nc,destroy_bridge_done
-    ; render_v3_row normally assumes that all bank interiors are already set.
-    ; The solid span violates that invariant, so clear the complete scanline
-    ; and use the deliberately slower full-row world reconstruction here.
-    ld c,0
-    call bridge_fill_full_bitmap_row
-    ld a,(bridge_restore_y)
-    call render_full_world_row
-    ld a,(bridge_restore_y)
-    inc a
-    ld (bridge_restore_y),a
-    ld a,(bridge_restore_rows)
-    dec a
-    ld (bridge_restore_rows),a
-    jr destroy_bridge_restore
-destroy_bridge_done:
+    ; The span stops killing anything at the moment of the hit, but it stays
+    ; bridge_active: the wreck is still drawn, so it must keep scrolling through
+    ; the ordinary bridge machinery instead of freezing on the screen rows it
+    ; happened to occupy. Only the hole columns leave the road model.
     xor a
-    ld (bridge_active),a
+    ld (bridge_lethal),a
     ld a,1
     ld (destroyed_road_active),a
+    call setup_bridge_crumble
     jp preserve_road_tank_after_bridge
+
+setup_bridge_crumble:
+    ; Only the span crumbles. On the latched flush banks of a bridge zone it is
+    ; exactly the water columns, so the land approaches - and the black road
+    ; edge lines on band rows 1 and 14 - are left alone throughout.
+    ld a,(bridge_col)
+    ld (bridge_crumble_min),a
+    ld b,a
+    ld a,(bridge_width)
+    add a,b
+    dec a
+    ld (bridge_crumble_max),a
+
+    ; Open the first hole at the column the shot went through, clamped into the
+    ; span, so the plane can always fly on through where the player aimed.
+    ld a,(bullet_x)
+    add a,7
+    srl a
+    srl a
+    srl a
+    ld b,a
+    ld a,(bridge_crumble_min)
+    cp b
+    jr c,crumble_hit_above_min
+    ld b,a                          ; hit at or left of the span: clamp to min
+    jr crumble_hit_ready
+crumble_hit_above_min:
+    ld a,(bridge_crumble_max)
+    cp b
+    jr nc,crumble_hit_ready
+    ld b,a                          ; hit right of the span: clamp to max
+crumble_hit_ready:
+    ld a,b
+    ld (bridge_hole_left),a
+    ld (bridge_crumble_col),a
+    inc a                           ; a two-byte opening unless the span ends
+    ld b,a
+    ld a,(bridge_crumble_max)
+    cp b
+    jr nc,crumble_hole_right_ready
+    ld b,a
+crumble_hole_right_ready:
+    ld a,b
+    ld (bridge_hole_right),a
+    ld (bridge_crumble_col_last),a
+    ld a,1
+    ld (bridge_crumble_active),a
+    xor a
+    ld (bridge_crumble_phase),a
+    ld a,BRIDGE_CRUMBLE_PAUSE
+    ld (bridge_crumble_timer),a
+    call bridge_dissolve_run        ; punch the hole in this very frame
+    jp bridge_paint_road_attributes ; hole cells turn to water, the rest stays road
+
+update_bridge_crumble:
+    ; A chunk goes every BRIDGE_CRUMBLE_PAUSE frames, never one column per
+    ; frame: the point is a rhythm of separate blasts, not a smooth dissolve.
+    ; Each blast takes BRIDGE_CRUMBLE_CHUNK bytes off both ends of the hole,
+    ; which is two 8x8 cells wide by the band's two cells tall.
+    ld a,(bridge_crumble_active)
+    or a
+    ret z
+    ld a,(bridge_crumble_timer)
+    dec a
+    ld (bridge_crumble_timer),a
+    ret nz
+    ld a,BRIDGE_CRUMBLE_PAUSE
+    ld (bridge_crumble_timer),a
+
+    ; Left chunk: the run ends just left of the hole and starts CHUNK further,
+    ; clamped at the span's first column.
+    ld a,(bridge_hole_left)
+    ld b,a
+    ld a,(bridge_crumble_min)
+    cp b
+    jr z,bridge_crumble_left_done
+    dec b
+    ld a,b
+    ld (bridge_crumble_col_last),a
+    sub BRIDGE_CRUMBLE_CHUNK-1
+    ld b,a
+    ld a,(bridge_crumble_min)
+    jr c,bridge_crumble_left_clamped ; borrowed past column zero: the span end wins
+    cp b
+    jr nc,bridge_crumble_left_clamped
+    ld a,b
+bridge_crumble_left_clamped:
+    ld (bridge_crumble_col),a
+    ld (bridge_hole_left),a
+    call bridge_dissolve_run
+bridge_crumble_left_done:
+    ld a,(bridge_hole_right)
+    ld b,a
+    ld a,(bridge_crumble_max)
+    cp b
+    jr z,bridge_crumble_right_done
+    inc b
+    ld a,b
+    ld (bridge_crumble_col),a
+    add a,BRIDGE_CRUMBLE_CHUNK-1
+    ld b,a
+    ld a,(bridge_crumble_max)
+    cp b
+    jr c,bridge_crumble_right_clamped
+    ld a,b
+bridge_crumble_right_clamped:
+    ld (bridge_crumble_col_last),a
+    ld (bridge_hole_right),a
+    call bridge_dissolve_run
+bridge_crumble_right_done:
+    call bridge_crumble_blast
+    call bridge_paint_road_attributes
+
+    ; The span is gone once the hole reaches both ends. Handing over to the
+    ; plain destroyed road from here keeps every later frame on the cheap path.
+    ld a,(bridge_hole_left)
+    ld b,a
+    ld a,(bridge_crumble_min)
+    cp b
+    ret nz
+    ld a,(bridge_hole_right)
+    ld b,a
+    ld a,(bridge_crumble_max)
+    cp b
+    ret nz
+    xor a
+    ld (bridge_crumble_active),a
+    ld (bridge_active),a
+    jp bridge_paint_destroyed_road_attributes
+
+bridge_crumble_blast:
+    ; One burst per stage, alternating ends, so the blasts read as walking out
+    ; from the hit instead of one continuous roar in the middle.
+    ld a,(bridge_crumble_phase)
+    xor 1
+    ld (bridge_crumble_phase),a
+    or a
+    jr z,bridge_crumble_blast_right
+    ld a,(bridge_hole_left)
+    jr bridge_crumble_blast_at
+bridge_crumble_blast_right:
+    ld a,(bridge_hole_right)
+bridge_crumble_blast_at:
+    add a,a
+    add a,a
+    add a,a
+    ld c,a
+    ld a,(bridge_y)
+    add a,2
+    ld b,a
+    ld a,c
+    jp start_hit_explosion
+
+bridge_dissolve_run:
+    ; Input bridge_crumble_col..bridge_crumble_col_last inclusive. Rewrite those
+    ; columns over the whole sixteen-line band with true world bytes, which is
+    ; what turns road back into river. The world query is used rather than a
+    ; plain zero fill because the FUEL depot belongs to that model and may share
+    ; these columns.
+bridge_dissolve_run_column:
+    call bridge_dissolve_column
+    ld a,(bridge_crumble_col)
+    ld b,a
+    ld a,(bridge_crumble_col_last)
+    cp b
+    ret c                           ; a one-column run, or a malformed one
+    ret z
+    ld a,b
+    inc a
+    ld (bridge_crumble_col),a
+    jr bridge_dissolve_run_column
+
+bridge_dissolve_column:
+    ; Rewrite bridge_crumble_col over the band's sixteen scanlines, taken from
+    ; the band's live top edge so the hole scrolls with everything else.
+    ld a,(bridge_y)
+    ld (bridge_crumble_row),a
+    ld b,16
+bridge_dissolve_row:
+    ld a,(bridge_crumble_row)
+    cp PLAYFIELD_BOTTOM
+    ret nc                          ; the rest of the band is below the playfield
+    cp 16
+    jr c,bridge_dissolve_next       ; a band hit while still entering the screen
+    push bc
+    ld a,(bridge_crumble_col)
+    ld c,a
+    ld a,(bridge_crumble_row)
+    call get_world_background_byte
+    ld c,a
+    ld a,(bridge_crumble_row)
+    call calc_screen_line_addr
+    ld a,(bridge_crumble_col)
+    add a,l
+    ld l,a
+    ld (hl),c
+    pop bc
+bridge_dissolve_next:
+    ld a,(bridge_crumble_row)
+    inc a
+    ld (bridge_crumble_row),a
+    djnz bridge_dissolve_row
+    ret
 
 preserve_road_tank_after_bridge:
     ; destroy_bridge_tank_bonus has already removed a mode-1 tank if it was on
@@ -2323,7 +2482,7 @@ check_player_background_pixels:
     ld a,6
     ld (player_core_rows),a
 
-    ld a,(bridge_active)
+    ld a,(bridge_lethal)
     or a
     jr z,player_world_prepare
     ld a,(player_core_y)
