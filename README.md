@@ -20,7 +20,7 @@ The loading screen above (`assets/loading-screen.png`) ships in both TAPs as a
 `SCREEN$` block, converted to the Spectrum's 6912-byte format in
 `assets/loading-screen.scr` and displayed while the code block loads.
 
-**Status:** `0.2.0` is a beta release. The core gameplay is playable, but level
+**Status:** `0.3.0` is a beta release. The core gameplay is playable, but level
 progression and final balancing are not complete yet: aircraft controls, two
 speed modifiers, firing, collisions, two lives, fuel and refuelling, a crash
 animation, scoring, AY sound, and a `GAME OVER` screen are in place.

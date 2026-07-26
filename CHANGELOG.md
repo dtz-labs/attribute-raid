@@ -7,6 +7,10 @@ both TAPs to every tagged release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-07-26
+
 ### Added
 
 - Loading screen: both TAPs carry a `SCREEN$` block (converted in
