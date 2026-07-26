@@ -5,7 +5,14 @@ renderer and optional AY-3-8912 sound for the Spectrum 128K or a 48K machine
 with an AY interface. All code executed on the Spectrum is well-commented Z80
 assembly; there is no C runtime.
 
-**Status:** `0.1.3` is a beta release. The core gameplay is playable, but level
+The sound effects, the sprites, and the sprite colours are unapologetically
+"stolen" from the Atari 2600 original: they were transcribed from Thomas
+Jentzsch's commented disassembly of River Raid (Activision, 1982), archived at
+<https://web.archive.org/web/20230404092047/http://www.bjars.com/source/RiverRaid.asm>
+(originally `bjars.com/source/RiverRaid.asm`). Only derived register values
+and shapes are reproduced here, no original code.
+
+**Status:** `0.2.0` is a beta release. The core gameplay is playable, but level
 progression and final balancing are not complete yet.
 
 V3 keeps the Atari-style eight-scanline course cadence, while each bank edge
@@ -79,12 +86,16 @@ real 8×1 colour on the TC2048, TC2068, and TS2068, but its colours will not
 display correctly on an ordinary Spectrum 128K. The Timex build keeps the same
 bitmap, incremental renderer, controls, and 48K-sized game code.
 
-The TC2048 has no native AY chip, so the Timex TAP deliberately remains silent
-there instead of writing to an absent device. A TC2068 or TS2068 is recognized
-from its HOME ROM signature and uses the native AY register/data ports
-`$00F5`/`$00F6`. The standard TAP continues to use the Spectrum 128K ports
-`$FFFD`/`$BFFD`. `make run-timex` therefore defaults to TC2068, while the
-model-specific targets make the selected hardware explicit.
+The TC2048 has no native AY chip, but one may be fitted as an optional
+interface, so the Timex TAP probes for it instead of going silent outright: a
+TC2068 or TS2068 is recognized from its HOME ROM signature and uses the
+native AY register/data ports `$00F5`/`$00F6`, while on a TC2048 the build
+tests the standard `$FFFD`/`$BFFD` ports (both odd addresses, so the ULA is
+never touched) and enables sound only when a real AY answers — register R1
+must mask a written `$FF` down to `$0F` and R0 must round-trip `$55`/`$AA`,
+which a floating bus fails. The standard TAP continues to use the Spectrum
+128K ports `$FFFD`/`$BFFD`. `make run-timex` therefore defaults to TC2068,
+while the model-specific targets make the selected hardware explicit.
 
 After loading, the game waits at a small start screen until SPACE or Kempston
 FIRE is pressed. Its copyright row scrolls on this screen and on the restart
