@@ -165,29 +165,6 @@ timex_advance_object_third_fast:
     inc h
     ret
 
-timex_next_attribute_row:
-    ; Input/output HL=the same byte column on adjacent Timex attribute lines.
-    ; Spectrum display memory advances H inside an 8-line character band;
-    ; crossing its last line advances L by 32 and folds H to the next band.
-    ld a,h
-    and 7
-    cp 7
-    jr z,timex_next_attribute_band
-    inc h
-    ret
-timex_next_attribute_band:
-    ld a,l
-    add a,32
-    ld l,a
-    jr c,timex_next_attribute_third
-    ld a,h
-    sub 7
-    ld h,a
-    ret
-timex_next_attribute_third:
-    inc h
-    ret
-
 prepare_timex_fuel_geometry:
     ld a,1
     ld (object_attr_width),a

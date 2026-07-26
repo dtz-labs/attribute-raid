@@ -13,6 +13,24 @@ both TAPs to every tagged release.
   GitHub Pages, embedded in the vendored JSSpeccy 3 emulator
   (`site/`, `.github/workflows/pages.yml`), linked from the README.
 
+### Fixed
+
+- Shots no longer erase the river banks. A two-pixel projectile was drawn by
+  storing its mask over the whole screen byte and cleaned up by writing plain
+  water, both assuming the byte was entirely river. Because a bullet keeps the
+  X it was fired at while the river narrows above it, and because its collision
+  test only asks whether the two lit pixels meet land, a byte holding both the
+  shot and bank pixels lost its land. On a straight bank the notch was
+  permanent. Projectiles and the splash now compose against live terrain and
+  their cleanup restores real world bytes.
+- The tank splash lands on its target instead of eight pixels to the right of
+  it. Its aim point is a centre but was consumed as a left edge, which put the
+  sprite's second byte on the right bank edge column.
+- Ships and the helicopter no longer spawn partly on land. All three asked for
+  a safe position using a scanline above the playfield, because raising their
+  active flag overwrote the row they meant to sample; ten percent of ship
+  spawns were affected.
+
 ## [0.3.0] - 2026-07-26
 
 ### Added

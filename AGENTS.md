@@ -55,6 +55,12 @@ with `pkill -f 'zesarux --configfile'` first):
 
 (Timex: `--machine TC2068 --enabletimexvideo` and the timex TAP.)
 
+On a headless host add `--vo null --ao null --audiovolume 0`. Without
+`--vo null` the Cocoa build blocks before it opens the ZRCP port, so the
+emulator sits at 0 % CPU with nothing listening and every tool times out
+waiting for it. The audio flags matter whenever the host has a speaker: the
+game starts its AY effects as soon as it runs.
+
 ### Autopilot bench builds
 
 Unattended measurement uses the AUTOPILOT define: invulnerable plane,

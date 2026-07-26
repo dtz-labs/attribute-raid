@@ -53,10 +53,20 @@ scanlines, so the renderer updates:
 - 19 scanlines at 1 px per frame,
 - 38 scanlines at 2 px per frame.
 
-On every affected scanline it normally replays only the precomputed bytes whose
-terrain value changed; complex fork transitions fall back to the bounded edge
-renderer. The full 6144-byte bitmap is rendered only during startup and after
-`R`.
+On every affected scanline it replays only the precomputed bytes whose terrain
+value changed. The full 6144-byte bitmap is rendered only during startup and
+after `R`.
+
+The delta list holds at most 16 byte pairs, and a block that would need more
+is marked `count=255` so the scanline falls back to the complete edge renderer
+(`render_v3_row_indexed`). That fallback is a safety net rather than a working
+case: a bank edge moves at most four pixels per block and an island opens one
+byte wide and grows or tapers one byte per side per step, so consecutive blocks
+never differ in enough bytes to overflow. `render_v3_row_indexed` therefore has
+only one live caller - bridge repair - and because every block of a bridge zone
+is generated without an island, its island-handling half never runs either.
+Both are kept so that a future wider terrain feature degrades correctly instead
+of drawing a truncated delta; neither is worth optimizing.
 
 ## Colour, bridge, and sprites
 

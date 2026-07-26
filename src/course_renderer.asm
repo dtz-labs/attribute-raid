@@ -284,8 +284,8 @@ course_right_x_ready:
 rebuild_block_bitmap_row:
     ; Materialize the complete 32-byte world row for the newly generated
     ; course block. Its geometry is five contiguous runs, so emit those runs
-    ; directly instead of asking get_course_background_byte_indexed thirty-two
-    ; times. Runtime mixed-terrain sprite composition still sees the identical
+    ; directly instead of classifying each of the thirty-two columns on its
+    ; own. Runtime mixed-terrain sprite composition still sees the identical
     ; materialized row.
     ld a,(course_block_head)
     ld (block_bitmap_build_index),a
@@ -415,7 +415,14 @@ rebuild_block_delta_next:
     jr nz,rebuild_block_delta_byte
     jr store_block_delta_count
 rebuild_block_delta_overflow:
-    ld a,255                         ; rare complex block uses old renderer
+    ; Safety net, not a working case. The current generator cannot fill 16
+    ; pairs: each bank edge moves at most four pixels per block, so it dirties
+    ; a couple of bytes, and an island opens at one byte wide and grows or
+    ; tapers by one byte per side per step (fork_left_offsets / fork_widths in
+    ; main.asm). A block therefore differs from its predecessor in a handful of
+    ; bytes. Keep the marker so a future wider feature degrades into the
+    ; complete edge renderer instead of rendering a truncated delta.
+    ld a,255
     ld (block_delta_build_count),a
 store_block_delta_count:
     ; The count page holds 32 live entries mirrored eight times, so the dirty
@@ -433,45 +440,6 @@ store_block_delta_mirror:
     add a,32
     ld l,a
     djnz store_block_delta_mirror
-    ret
-
-get_course_background_byte_indexed:
-    ; Input A=byte column, L=course block index. Output A=world byte.
-    ld b,a
-    ld h,HIGH(block_left_col)
-    cp (hl)
-    jr c,indexed_background_land
-    jr nz,indexed_background_check_right
-    ld h,HIGH(block_left_mask)
-    ld a,(hl)
-    ret
-indexed_background_check_right:
-    ld a,b
-    ld h,HIGH(block_right_col)
-    cp (hl)
-    jr c,indexed_background_check_island
-    jr nz,indexed_background_land
-    ld h,HIGH(block_right_mask)
-    ld a,(hl)
-    ret
-indexed_background_check_island:
-    ld h,HIGH(block_island_left)
-    ld a,(hl)
-    cp 255
-    jr z,indexed_background_water
-    ld c,a
-    ld a,b
-    cp c
-    jr c,indexed_background_water
-    ld h,HIGH(block_island_right)
-    cp (hl)
-    jr c,indexed_background_land
-    jr z,indexed_background_land
-indexed_background_water:
-    xor a
-    ret
-indexed_background_land:
-    ld a,255
     ret
 
 block_bitmap_address:
@@ -922,8 +890,10 @@ dirty_delta_replay:
     jr dirty_row_advance
 
 dirty_row_fallback:
-    ; Reconstruct the row Y and block index which the fast loop keeps
-    ; implicit, then run the full edge renderer with the registers saved.
+    ; Cold path: only a count=255 block reaches it, which the generator never
+    ; produces (see rebuild_block_delta_overflow). Reconstruct the row Y and
+    ; block index which the fast loop keeps implicit, then run the full edge
+    ; renderer with the registers saved.
     ld a,(dirty_rows_remaining)
     ld b,a
     ld a,19
@@ -975,6 +945,12 @@ render_v3_row_indexed:
     ; Dirty rows advance by exactly eight scanlines, so their circular block
     ; index is maintained by the caller. Bridge repair still enters above and
     ; calculates the first index normally.
+    ;
+    ; This routine has exactly two callers, and neither is the scroll pass:
+    ; dirty_row_fallback, which the generator never triggers, and bridge repair
+    ; via render_v3_row. Scrolling replays precomputed deltas in
+    ; dirty_delta_replay instead. So despite the dirty_ label prefix below,
+    ; nothing here is on the hot path - correctness matters, speed does not.
     ld a,(dirty_y)
     cp 16
     ret c
@@ -1030,6 +1006,11 @@ render_v3_row_indexed:
     ; Compare the old and new island intervals.  Unchanged plateaus cost no
     ; writes; changing tapers touch only bytes exposed at either edge instead
     ; of clearing and repainting the whole overlapping island.
+    ;
+    ; In practice this comparison always finds no island at all: the only live
+    ; caller is bridge repair, and a bridge zone is generated with island=255
+    ; on every block. It is kept because the routine is also the declared
+    ; fallback for a block delta that overflows.
     ld a,(row_block_index)
     dec a
     and 31
@@ -1247,13 +1228,6 @@ get_bounds_for_y:
     ld d,(hl)
     ld h,HIGH(block_right_col)
     ld e,(hl)
-    ret
-
-calc_river_center_col:
-    call get_bounds_for_y
-    ld a,d
-    add a,e
-    srl a
     ret
 
 get_pixel_lane_bounds:

@@ -772,14 +772,10 @@ prepare_transition_new_wide_ready:
     ret
 
 prepare_transition_old_projectile_x:
-    ; A is the actual two-pixel left edge.
+    ; A is the actual two-pixel left edge. The pair spills into the following
+    ; byte only at pixel offset 7, so this is the same test as
+    ; prepare_transition_new_projectile_x below, writing the old fields.
     ld c,a
-    and 7
-    ld a,1
-    jr nz,prepare_transition_old_projectile_check
-    jr prepare_transition_old_projectile_ready
-prepare_transition_old_projectile_check:
-    ld a,c
     and 7
     cp 7
     ld a,1
@@ -885,7 +881,7 @@ draw_current_splash_table_ready:
     ld c,a
     ld a,(tank_shell_y)
     ld b,6
-    jp write_water_sprite_2xn
+    jp write_world_sprite_2xn        ; the splash may straddle a bank byte
 
 draw_current_balloon_direct:
     ld a,(balloon_active)
@@ -1274,7 +1270,7 @@ transition_bullet_old_ready:
 transition_bullet_new_ready:
     ld a,4
     ld (transition_height),a
-    xor a
+    ld a,1                           ; restore real terrain, not blanket water
     ld (transition_background),a
     call cleanup_resident_sprite_delta
     jp draw_current_bullet_direct
@@ -1959,7 +1955,7 @@ transition_shell_direct:
     ld (transition_old_y),a
     ld a,(tank_shell_y)
     ld (transition_new_y),a
-    xor a
+    ld a,1                           ; restore real terrain, not blanket water
     ld (transition_background),a
 
     ; Projectile -> splash changes both height and representation. Restore the
@@ -2017,17 +2013,26 @@ restore_flying_shell_clip:
     ld a,b
     cp PLAYFIELD_BOTTOM
     ret nc
+    ; Restore true world bytes, not plain water: the shell's byte can hold bank
+    ; pixels even though its two lit pixels never do.
+    ld a,(transition_old_col)
+    ld c,a
+    ld a,b
+    push bc                          ; the terrain query clobbers B and C
+    call load_world_background_triplet
+    pop bc
+    ld a,b
     call calc_screen_line_addr
     ld a,(transition_old_col)
     add a,l
     ld l,a
-    xor a
+    ld a,(world_background_byte_0)
     ld (hl),a
     ld a,(transition_old_width)
     cp 2
     ret c
     inc l
-    xor a
+    ld a,(world_background_byte_1)
     ld (hl),a
     ret
 
@@ -3104,8 +3109,12 @@ bridge_tank_direct_next_row:
     ret
 
 write_water_projectile_2xn:
-    ; Input A=Y, C=pixel X, B=height. Store the two-pixel mask directly over
-    ; guaranteed water; unlike XOR this cannot remove an already visible shot.
+    ; Input A=Y, C=pixel X, B=height. A two-pixel shot is not guaranteed to sit
+    ; over a whole water byte: bullet_x is latched when the shot is fired and
+    ; the river keeps narrowing above it, and the collision test only asks
+    ; whether the two lit pixels meet land. Storing the bare mask therefore used
+    ; to erase whatever bank pixels shared the byte, permanently on a straight
+    ; section, so each byte is composed against fresh world geometry instead.
     ld (world_write_y),a
     ld a,b
     ld (world_write_rows),a
@@ -3130,15 +3139,26 @@ write_water_projectile_row:
     ld a,(world_write_y)
     cp PLAYFIELD_BOTTOM
     ret nc
+    ld a,(world_write_col)
+    ld c,a
+    ld a,(world_write_y)
+    call load_world_background_triplet
+    ld a,(world_write_y)
     call calc_screen_line_addr
     ld a,(world_write_col)
     add a,l
     ld l,a
+    ld a,(world_background_byte_0)
+    ld b,a
     ld a,(world_write_byte_0)
+    xor b                            ; a shot over land reads as a water hole
     ld (hl),a
     ld a,(world_write_byte_1)
     or a
     jr z,write_water_projectile_skip_spill
+    ld b,a
+    ld a,(world_background_byte_1)
+    xor b
     inc l
     ld (hl),a
 write_water_projectile_skip_spill:

@@ -121,6 +121,7 @@ spawn_ship0:
     ld (ship0_y),a
     ld a,1
     ld (ship0_active),a
+    ld a,(ship0_y)                  ; the active flag above clobbered the Y
     call calc_safe_river_x_wide
     ld (ship0_x),a
     ret
@@ -169,6 +170,7 @@ spawn_ship1:
     ld (ship1_y),a
     ld a,1
     ld (ship1_active),a
+    ld a,(ship1_y)                  ; the active flag above clobbered the Y
     call calc_safe_river_x_wide
     ld (ship1_x),a
     ld a,1
@@ -558,6 +560,7 @@ spawn_helicopter:
     ld (helicopter_y),a
     ld a,1
     ld (helicopter_active),a
+    ld a,(helicopter_y)             ; the active flag above clobbered the Y
     call calc_safe_river_x
     ld (helicopter_x),a
     ld a,(helicopter_move)
@@ -1181,7 +1184,13 @@ move_tank_shell_left:
     ret
 
 land_tank_shell:
+    ; tank_shell_target_x is a centre: it is clamped against the lane exactly
+    ; like the jet's own centre. tank_shell_x is a left edge for every consumer,
+    ; the splash draw and its cleanup rect included, so convert once here.
+    ; Without this the 16-pixel splash sat eight pixels right of its landing
+    ; point and its second byte covered the right bank edge.
     ld a,(tank_shell_target_x)
+    sub 8
     ld (tank_shell_x),a
     call start_ay_splash
     ld a,10
