@@ -17,7 +17,7 @@ concurrency:
 
 env:
   # bump to move to a newer emulator build
-  JSSPECCY_RELEASE: v3.2.0-timex.1
+  JSSPECCY_RELEASE: v3.2.0-timex.2
 
 jobs:
   deploy:
