@@ -118,6 +118,8 @@ init_entities:
     ld (bridge_tank_side),a
     ld (bridge_tank_move_phase),a
     ld (bridge_active),a
+    ld (bridge_lethal),a
+    ld (bridge_crumble_active),a
     ld (destroyed_road_active),a
     ld (player_move),a
     ld (player_bank),a
@@ -2291,6 +2293,9 @@ get_world_terrain_byte:
     sub b
     cp 16
     jr nc,world_background_course
+    ld a,(background_query_col)
+    call bridge_column_still_road
+    jr z,world_background_course    ; blown out of the span: plain river again
     ld a,255
     ret
 #else
@@ -2319,6 +2324,9 @@ world_background_band_solid:
     ld a,(bridge_active)
     or a
     jp z,world_background_course    ; destroyed road: course model serves it
+    ld a,(background_query_col)
+    call bridge_column_still_road
+    jp z,world_background_course    ; blown out of the span: plain river again
     ld a,255
     ret
 #endif
@@ -2477,6 +2485,9 @@ load_world_terrain_triplet:
     sub b
     cp 16
     jr nc,world_triplet_course
+    ld a,(bridge_crumble_active)
+    or a
+    jr nz,world_triplet_band_crumbling
     ld a,255
     ld (world_background_byte_0),a
     ld (world_background_byte_1),a
@@ -2503,10 +2514,16 @@ load_world_terrain_triplet:
     ld a,(bridge_active)
     or a
     jr z,world_triplet_band_course_base
+    ld a,(bridge_crumble_active)
+    or a
+    jr nz,world_triplet_band_crumble_base
     ld a,255
     ld (world_background_byte_0),a
     ld (world_background_byte_1),a
     ld (world_background_byte_2),a
+    jr world_triplet_band_overlay
+world_triplet_band_crumble_base:
+    call world_triplet_band_crumbling
     jr world_triplet_band_overlay
 world_triplet_band_course_base:
     call world_triplet_course
@@ -2547,6 +2564,30 @@ world_triplet_overlay_byte_1:
     ld (world_background_byte_1),a
     ret
 #endif
+
+world_triplet_band_crumbling:
+    ; Mid-crumble the band is a mixture, so the course model provides the base
+    ; and only the columns still standing are put back to solid road. Doing it
+    ; this way round keeps the hole exactly as wide as the renderer drew it.
+    call world_triplet_course
+    ld hl,world_background_byte_0   ; the three slots are consecutive
+    ld a,(background_query_col)
+    ld c,a
+    ld b,3
+world_triplet_crumble_byte:
+    push bc
+    push hl
+    ld a,c
+    call bridge_column_still_road
+    pop hl
+    pop bc
+    jr z,world_triplet_crumble_next
+    ld (hl),255
+world_triplet_crumble_next:
+    inc hl
+    inc c
+    djnz world_triplet_crumble_byte
+    ret
 
 world_triplet_course:
     call resolve_course_block_index
@@ -3320,6 +3361,79 @@ write_world_shifted_2_addr_ready:
     ld (world_write_addr),hl
     jp write_world_shifted_2_row
 
+bridge_paint_attr_span:
+    ; Input HL=the span's first colour cell; returns HL one cell past its last.
+    ; Colour must never run ahead of the bitmap: an 0xff road byte under water
+    ; paper shows its INK, which is what used to make an abandoned span glare
+    ; solid green. Only columns whose bitmap has genuinely become river here
+    ; take the water colour.
+    ld a,(bridge_crumble_active)
+    or a
+    jr nz,bridge_attr_span_crumbled
+    ld a,(bridge_width)
+    ld b,a
+    ld a,(bridge_center_attr)       ; brown intact span or normal broken water
+    jr bridge_paint_attr_run
+bridge_attr_span_crumbled:
+    ld a,(bridge_col)
+    ld c,a
+    ld a,(bridge_hole_left)
+    sub c
+    jr z,bridge_attr_span_hole
+    ld b,a
+    ld a,(bridge_center_attr)
+    call bridge_paint_attr_run
+bridge_attr_span_hole:
+    ld a,(bridge_hole_left)
+    ld c,a
+    ld a,(bridge_hole_right)
+    sub c
+    inc a
+    ld b,a
+    ld a,0x4c                       ; the blown columns are ordinary water
+    call bridge_paint_attr_run
+    ld a,(bridge_col)
+    ld c,a
+    ld a,(bridge_width)
+    add a,c
+    ld c,a                          ; first column past the span
+    ld a,(bridge_hole_right)
+    inc a
+    ld b,a
+    ld a,c
+    sub b
+    ret z
+    ld b,a
+    ld a,(bridge_center_attr)
+bridge_paint_attr_run:
+    ld (hl),a
+    inc l
+    djnz bridge_paint_attr_run
+    ret
+
+bridge_column_still_road:
+    ; Input A=byte column. Returns NZ while that column is road the world model
+    ; must serve as solid, and Z once the crumble has blown it away. Columns
+    ; outside the span are approaches and can never be in the hole.
+    ld b,a
+    ld a,(bridge_crumble_active)
+    or a
+    jr z,bridge_column_road
+    ld a,(bridge_hole_left)
+    cp b
+    jr z,bridge_column_gone
+    jr nc,bridge_column_road        ; left of the hole
+    ld a,(bridge_hole_right)
+    cp b
+    jr c,bridge_column_road         ; right of the hole
+bridge_column_gone:
+    xor a
+    ret
+bridge_column_road:
+    ld a,1
+    or a
+    ret
+
 bridge_fill_rows:
     ; Input A=start Y, B=row count, C=byte value. The bridge is maintained as
     ; a persistent bitmap band: only rows entering or leaving its 16-line
@@ -3364,12 +3478,16 @@ bridge_fill_row:
     ld a,(bridge_col)
     add a,l
     ld l,a
+    ld a,(bridge_crumble_active)
+    or a
+    jr nz,bridge_fill_row_crumbled
     ld a,(bridge_width)
     ld b,a
 bridge_fill_byte:
     ld (hl),c
     inc l
     djnz bridge_fill_byte
+bridge_fill_row_done:
     ld a,(bridge_rows_left)
     dec a
     ld (bridge_rows_left),a
@@ -3377,6 +3495,46 @@ bridge_fill_byte:
     ld sp,(sprite_saved_sp)
     ei
     ret
+
+bridge_fill_row_crumbled:
+    ; The hole is river the course renderer already keeps correct, so the band
+    ; writer steps over it rather than stamping road back into it. Only two
+    ; runs remain: the span up to the hole, and the span beyond it.
+    ld a,(bridge_col)
+    ld d,a
+    ld a,(bridge_width)
+    add a,d
+    ld d,a                          ; first column past the span
+    ld a,(bridge_col)
+    ld e,a
+    ld a,(bridge_hole_left)
+    sub e
+    jr z,bridge_fill_skip_hole
+    ld b,a
+bridge_fill_left_byte:
+    ld (hl),c
+    inc l
+    djnz bridge_fill_left_byte
+bridge_fill_skip_hole:
+    ld a,(bridge_hole_left)
+    ld e,a
+    ld a,(bridge_hole_right)
+    sub e
+    inc a
+    add a,l
+    ld l,a
+    ld a,(bridge_hole_right)
+    inc a
+    ld e,a
+    ld a,d
+    sub e
+    jr z,bridge_fill_row_done
+    ld b,a
+bridge_fill_right_byte:
+    ld (hl),c
+    inc l
+    djnz bridge_fill_right_byte
+    jr bridge_fill_row_done
 
 bridge_refresh_edges:
     ; The bank pass touches only speed_pixels residue classes modulo eight.
@@ -3422,6 +3580,9 @@ bridge_refresh_edge_row:
     cp PLAYFIELD_BOTTOM
     ret nc
     call calc_screen_line_addr
+    ld a,(bridge_crumble_active)
+    or a
+    jr nz,bridge_refresh_edge_crumbled
     ld a,(bridge_col)
     add a,l
     ld l,a
@@ -3435,6 +3596,38 @@ bridge_refresh_edge_row:
     ld (hl),255
     inc l
     ld (hl),255
+    ret
+
+bridge_refresh_edge_crumbled:
+    ; The bank pass only ever reaches the span's outermost columns, and the
+    ; hole reaches them last, so each of the four is repaired individually
+    ; rather than as a pair - one end can go a stage before the other.
+    ld a,(bridge_col)
+    ld e,a
+    call bridge_refresh_edge_byte
+    inc e
+    call bridge_refresh_edge_byte
+    ld a,(bridge_col)
+    ld b,a
+    ld a,(bridge_width)
+    add a,b
+    sub 2
+    ld e,a
+    call bridge_refresh_edge_byte
+    inc e
+    jp bridge_refresh_edge_byte
+
+bridge_refresh_edge_byte:
+    ; Input HL=row base, E=byte column; preserves both.
+    ld a,e
+    call bridge_column_still_road
+    ret z
+    push hl
+    ld a,e
+    add a,l
+    ld l,a
+    ld (hl),255
+    pop hl
     ret
 
 bridge_paint_road_attributes:
@@ -3546,13 +3739,7 @@ bridge_attr_left_byte:
     inc l
     djnz bridge_attr_left_byte
 bridge_attr_paint_span:
-    ld a,(bridge_width)
-    ld b,a
-    ld a,(bridge_center_attr)       ; brown intact span or normal broken water
-bridge_attr_span_byte:
-    ld (hl),a
-    inc l
-    djnz bridge_attr_span_byte
+    call bridge_paint_attr_span     ; road colour, minus whatever has crumbled
 
     ld a,(bridge_col)
     ld b,a
@@ -3761,13 +3948,7 @@ timex_bridge_attr_left_byte:
     inc l
     djnz timex_bridge_attr_left_byte
 timex_bridge_attr_span:
-    ld a,(bridge_width)
-    ld b,a
-    ld a,(bridge_center_attr)
-timex_bridge_attr_center_byte:
-    ld (hl),a
-    inc l
-    djnz timex_bridge_attr_center_byte
+    call bridge_paint_attr_span     ; road colour, minus whatever has crumbled
     ld a,(bridge_col)
     ld b,a
     ld a,(bridge_width)

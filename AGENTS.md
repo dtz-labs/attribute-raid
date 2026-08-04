@@ -88,11 +88,28 @@ python3 tools/zrcp_tail_profiler.py build-bench-std/attribute-raid.map \
     30 /tmp/profile.txt
 ```
 
-`PLAY_SECONDS 0` only drains an already recorded history. Pitfalls: run
-one profiling cycle per emulator launch (toggling cpu-history can pop the
-emulator menu); do not sample with `get-registers` polling (it aliases to
-the command-service point); entry counts are not T-states — idle frames
-have MORE entries, not fewer.
+`PLAY_SECONDS 0` only drains an already recorded history.
+
+Pitfalls, all of them learned the hard way:
+
+- Run **one profiling cycle per emulator launch**. A second cycle on the
+  same instance reads whatever state the first one left behind, which shows
+  up as a trace that is 100% ROM.
+- **Wait until the game is actually playing before starting the profiler.**
+  Every cpu-history command briefly enters cpu-step mode, which the emulator
+  refuses while a menu is open; the tool now clears that with
+  `close-all-menus`, and doing so *cancels a tape load in progress*, leaving
+  the machine in BASIC. Poll a game symbol (`player_x` changing) first.
+- **`write-memory` silently drops the emulator into cpu-step.** Follow every
+  poke with `exit-cpu-step` or the machine freezes and nothing else happens.
+- Reading a multi-byte value one byte at a time straddles the frame that
+  changes it and invents intermediate states. Read adjacent bytes in a single
+  `read-memory`.
+- Do not sample with `get-registers` polling (it aliases to the
+  command-service point).
+- Entry counts are not T-states — idle frames have MORE entries, not fewer.
+- Two builds never play the same scene, so overrun percentages compare only
+  loosely; a difference of a point or so is scene noise, not a regression.
 
 ### tools/zrcp_bridge_screenshot.py — frozen visual verification
 

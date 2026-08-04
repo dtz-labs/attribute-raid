@@ -84,17 +84,33 @@ def main():
     buf = b""
     _, buf = read_until_prompt(sock, buf)  # banner
 
+    # Every command that briefly enters cpu-step mode is refused while any
+    # emulator menu (the tape-load progress window, say) is open. Under
+    # --vo null no keypress can dismiss it, so close it over the protocol and
+    # retry - otherwise the setup commands fail silently and the run drains the
+    # 1M-entry default buffer, or the drain reads a buffer that is still moving.
+    # Closing menus cancels a tape load, so only profile an already running game.
+    reply = {}
+
+    def with_menu_retry(cmd, buf, tries=6):
+        for _ in range(tries):
+            resp, buf = command(sock, buf, cmd)
+            text = resp.decode().strip()
+            reply[cmd] = resp
+            print(f"{cmd.decode()}: {text or 'ok'}", flush=True)
+            if "Can not enter cpu step" not in text:
+                return buf
+            _, buf = command(sock, buf, b"close-all-menus")
+            time.sleep(1)
+        raise SystemExit(f"{cmd.decode()}: blocked by an emulator menu")
+
     # PLAY_SECONDS=0 means drain-only: the emulator already holds a recorded
     # buffer (for example after a previous run died mid-drain in step mode).
     if play_seconds > 0:
-        # set-max-size works only while history is enabled; starting the
-        # recorder briefly enters cpu-step mode, which fails while any menu
-        # (like the tape-load progress window) is open - retry until closed.
         for cmd in (b"cpu-history enabled yes",
                     b"cpu-history set-max-size %d" % MAX_SIZE,
                     b"cpu-history get-max-size"):
-            resp, buf = command(sock, buf, cmd)
-            print(f"{cmd.decode()}: {resp.decode().strip() or 'ok'}", flush=True)
+            buf = with_menu_retry(cmd, buf)
 
         text = ""
         for _ in range(30):
@@ -107,19 +123,15 @@ def main():
         else:
             raise SystemExit(f"could not start cpu history: {text}")
 
-        resp, buf = command(sock, buf, b"cpu-history clear")
-        print(f"cpu-history clear: {resp.decode().strip() or 'ok'}", flush=True)
+        buf = with_menu_retry(b"cpu-history clear", buf)
 
         print(f"silent for {play_seconds:.0f}s of play", flush=True)
         time.sleep(play_seconds)
 
-    resp, buf = command(sock, buf, b"enter-cpu-step")
-    text = resp.decode().strip()
-    if text:
-        print(f"enter-cpu-step: {text}", flush=True)  # may already be stepped
+    buf = with_menu_retry(b"enter-cpu-step", buf)
     try:
-        resp, buf = command(sock, buf, b"cpu-history get-size")
-        size = int(resp.split()[0])
+        buf = with_menu_retry(b"cpu-history get-size", buf)
+        size = int(reply[b"cpu-history get-size"].split()[0])
         size = min(size, MAX_SIZE)
         print(f"draining {size} entries", flush=True)
         trace_new_to_old = []

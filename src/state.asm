@@ -119,6 +119,7 @@ tank_shell_dir: db 1             ; 1=right, 255=left
 tank_shell_target_x: db 120       ; safe water point selected when fired
 tank_splash_timer: db 0
 bridge_active: db 0              ; bridge bitmap persists between frames
+bridge_lethal: db 0              ; cleared by the hit: the wreck kills nobody
 destroyed_road_active: db 0      ; white approaches remain after span removal
 bridge_y: db 0
 bridge_col: db 0
@@ -126,6 +127,20 @@ bridge_width: db 0
 bridge_rows_left: db 0
 bridge_restore_y: db 0
 bridge_restore_rows: db 0
+; A hit blows a hole through the span and the hole then widens outward in
+; two-byte steps, one step every BRIDGE_CRUMBLE_PAUSE frames. The span stays
+; bridge_active throughout, so the wreck keeps scrolling with the world through
+; the ordinary bridge machinery; only bridge_lethal and the hole columns change.
+bridge_crumble_active: db 0
+bridge_crumble_timer: db 0       ; frames left before the next chunk goes
+bridge_crumble_phase: db 0       ; alternates which side gets the burst
+bridge_crumble_min: db 0         ; first span column
+bridge_crumble_max: db 0         ; last span column
+bridge_hole_left: db 0           ; lowest span column already blown away
+bridge_hole_right: db 0          ; highest span column already blown away
+bridge_crumble_col: db 0         ; scratch for the column being dissolved
+bridge_crumble_col_last: db 0    ; scratch for the last column of the run
+bridge_crumble_row: db 0         ; scratch for its current scanline
 bridge_attr_row: db 0
 bridge_attr_rows: db 0
 bridge_center_attr: db 0x4a       ; BRIGHT red intact span or normal water
